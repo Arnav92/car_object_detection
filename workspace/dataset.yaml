@@ -1,0 +1,8 @@
+# Auto-generated dataset file
+path: D:/TUM/Semesters/Semester 4/Python for Engineering Data Analysis/Final Project Report/Final_Project_Code/workspace
+train: D:/TUM/Semesters/Semester 4/Python for Engineering Data Analysis/Final Project Report/Final_Project_Code/workspace/train/images
+val: D:/TUM/Semesters/Semester 4/Python for Engineering Data Analysis/Final Project Report/Final_Project_Code/workspace/val/images
+test: D:/TUM/Semesters/Semester 4/Python for Engineering Data Analysis/Final Project Report/Final_Project_Code/workspace/test/images
+
+names: ["car"]
+nc: 1
