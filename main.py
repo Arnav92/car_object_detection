@@ -64,7 +64,7 @@ USE_KFOLD = False
 KFOLD_SPLITS = 5
 
 # Two model configs
-MODEL_CONFIGS = [
+'''MODEL_CONFIGS = [
     {
         "name": "YOLO",           # accurate
         "pretrained": "yolov8s.pt",
@@ -74,6 +74,19 @@ MODEL_CONFIGS = [
         "name": "FastYOLO",       # fast
         "pretrained": "yolov8n.pt",
         "run_name": "yolo_n_fast"
+    },
+    {
+        "name": "UntrainedYOLO",       # no pretraining
+        "pretrained": "yolov8s.yaml",
+        "run_name": "untrained_yolo_s_acc"
+    }
+]'''
+
+MODEL_CONFIGS = [
+    {
+        "name": "UntrainedYOLO",       # no pretraining
+        "pretrained": "yolov8s.yaml",
+        "run_name": "untrained_yolo_s_acc"
     }
 ]
 
@@ -90,7 +103,7 @@ ds_paths = {
 }
 
 # Define pretrained weights (useful if not training and/or trained before)
-per_model = {
+'''per_model = {
     "YOLO": {
         "best_weights": "workspace/runs/yolo_s_acc/weights/best.pt",
         "results_csv": "workspace/runs/yolo_s_acc/results.csv"
@@ -98,6 +111,17 @@ per_model = {
     "FastYOLO": {
         "best_weights": "workspace/runs/yolo_n_fast/weights/best.pt",
         "results_csv": "workspace/runs/yolo_n_fast/results.csv"
+    },
+    "UntrainedYOLO": {
+        "best_weights": "workspace/runs/untrained_yolo_s_acc/weights/best.pt",
+        "results_csv": "workspace/runs/untrained_yolo_s_acc/results.csv"
+    }
+}'''
+
+per_model = {
+    "UntrainedYOLO": {
+        "best_weights": "workspace/runs/untrained_yolo_s_acc/weights/best.pt",
+        "results_csv": "workspace/runs/untrained_yolo_s_acc/results.csv"
     }
 }
 
@@ -464,7 +488,7 @@ def sample_detection_grid(weights_path: str, images_dir: str, n: int = 8, seed: 
             xyxy = r.boxes.xyxy.cpu().numpy()
             for (xmin, ymin, xmax, ymax) in xyxy:
                 ax.add_patch(plt.Rectangle((xmin, ymin), xmax-xmin, ymax-ymin,
-                                           fill=False, linewidth=2))
+                                           fill=False, linewidth=2, edgecolor="red"))
     plt.tight_layout()
     return fig
 
@@ -633,7 +657,7 @@ def main():
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
-    # train()
+    train()
     test()
 
 
