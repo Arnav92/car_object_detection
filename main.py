@@ -37,7 +37,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.model_selection import train_test_split, KFold
-
 # Defining plot style
 font = {'weight': 'bold', 'size': 11}
 matplotlib.rc('font', **font)
