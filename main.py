@@ -63,7 +63,7 @@ USE_KFOLD = False
 KFOLD_SPLITS = 5
 
 # Two model configs
-'''MODEL_CONFIGS = [
+MODEL_CONFIGS = [
     {
         "name": "YOLO",           # accurate
         "pretrained": "yolov8s.pt",
@@ -75,15 +75,7 @@ KFOLD_SPLITS = 5
         "run_name": "yolo_n_fast"
     },
     {
-        "name": "UntrainedYOLO",       # no pretraining
-        "pretrained": "yolov8s.yaml",
-        "run_name": "untrained_yolo_s_acc"
-    }
-]'''
-
-MODEL_CONFIGS = [
-    {
-        "name": "UntrainedYOLO",       # no pretraining
+        "name": "UnpretrainedYOLO",       # no pretraining
         "pretrained": "yolov8s.yaml",
         "run_name": "untrained_yolo_s_acc"
     }
@@ -102,7 +94,7 @@ ds_paths = {
 }
 
 # Define pretrained weights (useful if not training and/or trained before)
-'''per_model = {
+per_model = {
     "YOLO": {
         "best_weights": "workspace/runs/yolo_s_acc/weights/best.pt",
         "results_csv": "workspace/runs/yolo_s_acc/results.csv"
@@ -111,14 +103,7 @@ ds_paths = {
         "best_weights": "workspace/runs/yolo_n_fast/weights/best.pt",
         "results_csv": "workspace/runs/yolo_n_fast/results.csv"
     },
-    "UntrainedYOLO": {
-        "best_weights": "workspace/runs/untrained_yolo_s_acc/weights/best.pt",
-        "results_csv": "workspace/runs/untrained_yolo_s_acc/results.csv"
-    }
-}'''
-
-per_model = {
-    "UntrainedYOLO": {
+    "UnpretrainedYOLO": {
         "best_weights": "workspace/runs/untrained_yolo_s_acc/weights/best.pt",
         "results_csv": "workspace/runs/untrained_yolo_s_acc/results.csv"
     }
@@ -207,7 +192,6 @@ def load_and_group_training_csv(csv_path: str) -> pd.DataFrame:
 
     # Group all boxes per image
     grouped = df.groupby("image").agg(list).reset_index()
-    print(f"Grouped: {grouped}")
     return grouped
 
 
@@ -556,7 +540,7 @@ def generate_pdf_report(per_model_artifacts: Dict[str, Dict[str, str]], out_pdf:
         fig = plt.figure(figsize=(11.7, 8.3))
         plt.text(0.5, 0.8, "Car Object Detection Report", ha='center', va='center', fontsize=22, weight='bold')
         lines = [
-            "Models: YOLO (yolov8s) and FastYOLO (yolov8n)",
+            "Models: YOLO (yolov8s) and FastYOLO (yolov8n) and UnpretrainedYOLO",
             "Dataset: Kaggle Car Object Detection (converted to YOLO format)",
             "Outputs: test_predictions.csv, trained weights, curves, sample detections",
             f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -656,7 +640,7 @@ def main():
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
-    train()
+    # train()
     test()
 
 
