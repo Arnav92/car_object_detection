@@ -226,14 +226,9 @@ def build_yolo_dataset_structure(grouped_df: pd.DataFrame,
         ensure_dir(d)
 
     # Split images into train/val
-    all_image_names = grouped_df["image"].tolist()
-    # Keep only those files that actually exist in training_images_root
-    existing = [im for im in all_image_names if os.path.exists(os.path.join(train_images_root, im))]
-    if len(existing) < len(all_image_names):
-        missing = set(all_image_names) - set(existing)
-        print(f"Warning: {len(missing)} images listed in CSV were not found on disk. Proceeding with {len(existing)}.")
-
-    train_names, val_names = train_test_split(existing, test_size=val_ratio, random_state=seed, shuffle=True)
+    all_image_paths = list_images(train_images_root)
+    all_image_names = [os.path.basename(p) for p in all_image_paths]
+    train_names, val_names = train_test_split(all_image_names, test_size=val_ratio, random_state=seed, shuffle=True)
 
     # Build dict for quick lookup of boxes
     # grouped_df has rows: image, xmin(list), ymin(list), xmax(list), ymax(list)
@@ -640,7 +635,7 @@ def main():
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
-    # train()
+    train()
     test()
 
 
