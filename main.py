@@ -48,6 +48,7 @@ DATA_DIR = os.path.join("data")  # expects ./data/training_images, ./data/testin
 TRAIN_IMAGES_DIR = os.path.join(DATA_DIR, "training_images")
 TEST_IMAGES_DIR = os.path.join(DATA_DIR, "testing_images")
 TRAIN_CSV = os.path.join(DATA_DIR, "train_solution_bounding_boxes (1).csv")
+PERSONAL_DIR = os.path.join(DATA_DIR, "personal_images")
 
 WORKSPACE = "workspace"  # we'll build YOLOv8 format dataset here
 MODELS_DIR = "models"    # store/check pretrained + trained weights here
@@ -563,6 +564,89 @@ def generate_pdf_report(per_model_artifacts: Dict[str, Dict[str, str]], out_pdf:
 
     print(f"Saved report: {out_pdf}")
 
+def generate_personal_images_report(per_model_artifacts: Dict[str, Dict[str, str]],
+                                    out_pdf: str = "personal_images_report.pdf",
+                                    personal_images_dir: str = PERSONAL_DIR,
+                                    imgsz: int = IMGSZ,
+                                    cols: int = 3,
+                                    rows: int = 3) -> str:
+    """
+    Create a PDF (out_pdf) containing detection results on ALL images in personal_images_dir
+    for each model in per_model_artifacts. Each model's outputs are clearly separated by a
+    model-title page (only the model title) followed by grid pages of images with boxes.
+    IMPORTANT: images will NOT have titles or filenames shown — only the model/title pages
+    separate model outputs.
+
+    Returns the path to the written PDF (out_pdf).
+    """
+    # verify input dir
+    if not os.path.exists(personal_images_dir):
+        raise FileNotFoundError(f"Personal images directory not found: {personal_images_dir}")
+
+    imgs = list_images(personal_images_dir)
+    if len(imgs) == 0:
+        raise FileNotFoundError(f"No images found in PERSONAL_DIR: {personal_images_dir}")
+
+    per_page = cols * rows
+
+    with PdfPages(out_pdf) as pdf:
+        # Iterate models in order of keys in per_model_artifacts
+        for model_label, art in per_model_artifacts.items():
+            weights = art.get("best_weights")
+            if weights is None or not os.path.exists(weights):
+                # Try to fall back to the weights path anyway (YOLO can accept cache name)
+                print(f"Warning: weights for {model_label} not found at {weights}. Attempting to load anyway.")
+            # Add a single title page for this model (only the model title)
+            fig_title = plt.figure(figsize=(11.7, 8.3))
+            plt.text(0.5, 0.5, model_label, ha='center', va='center', fontsize=28, weight='bold')
+            plt.axis('off')
+            pdf.savefig(fig_title);
+            plt.close(fig_title)
+
+            # Load model once per model
+            ymodel = YOLO(normalize_path(weights) if weights else weights)
+
+            # Process images in consistent order
+            for i in range(0, len(imgs), per_page):
+                chunk = imgs[i:i + per_page]
+                rows_actual = math.ceil(len(chunk) / cols)
+                fig = plt.figure(figsize=(cols * 5, rows_actual * 4))
+                for idx, img_path in enumerate(chunk):
+                    ax = fig.add_subplot(rows_actual, cols, idx + 1)
+                    # read and show image
+                    img_bgr = cv2.imread(img_path)
+                    if img_bgr is None:
+                        # show blank if unreadable
+                        ax.text(0.5, 0.5, "Could not read image", ha='center', va='center')
+                        ax.axis('off')
+                        continue
+                    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                    ax.imshow(img_rgb)
+                    ax.axis('off')  # NO image titles as requested
+
+                    # run predict for this image and draw boxes
+                    try:
+                        res = ymodel.predict(source=img_path, imgsz=imgsz, verbose=False)[0]
+                    except Exception as e:
+                        # if prediction fails, still continue
+                        print(f"Prediction failed for {img_path} with model {model_label}: {e}")
+                        continue
+
+                    if getattr(res, "boxes", None) is not None and len(res.boxes) > 0:
+                        xyxy = res.boxes.xyxy.cpu().numpy()
+                        for (xmin, ymin, xmax, ymax) in xyxy:
+                            # draw rectangle in display coordinates
+                            ax.add_patch(plt.Rectangle((xmin, ymin),
+                                                       xmax - xmin,
+                                                       ymax - ymin,
+                                                       fill=False, linewidth=2, edgecolor="red"))
+                plt.tight_layout()
+                pdf.savefig(fig)
+                plt.close(fig)
+
+    print(f"Saved personal images report: {out_pdf}")
+    return out_pdf
+
 def train():
     # Sanity checks - must exist for program to work
     ensure_dir_with_msg(TRAIN_IMAGES_DIR, f"Expected training images at {TRAIN_IMAGES_DIR}")
@@ -616,6 +700,8 @@ def test():
     #    If val is empty (tiny datasets), we can also pick from train or test.
     test_dir = ds_paths["test_images"]
     generate_pdf_report(per_model, REPORT_PDF, dataset_preview_dir=test_dir)
+    personal_report = generate_personal_images_report(per_model, out_pdf="personal_images_report.pdf",
+                                                      personal_images_dir=PERSONAL_DIR)
 
     print("\nAll done!")
     print("Artifacts created:")
@@ -623,6 +709,7 @@ def test():
         print(f"  - {m} best weights: {art['best_weights']}")
         print(f"  - {m} results.csv:  {art['results_csv']}")
         print(f"  - Test CSV:         {test_csvs[m]}")
+    print(f"Personal images report written: {personal_report}")
     print(f"  - Report PDF:       {REPORT_PDF}")
 
 
