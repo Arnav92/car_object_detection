@@ -614,9 +614,8 @@ def test():
 
     # 4) Generate PDF report with curves + samples (use VAL images for samples)
     #    If val is empty (tiny datasets), we can also pick from train or test.
-    val_dir = ds_paths["val_images"]
-    use_dir = val_dir if len(list_images(val_dir)) > 0 else ds_paths["test_images"]
-    generate_pdf_report(per_model, REPORT_PDF, dataset_preview_dir=use_dir)
+    test_dir = ds_paths["test_images"]
+    generate_pdf_report(per_model, REPORT_PDF, dataset_preview_dir=test_dir)
 
     print("\nAll done!")
     print("Artifacts created:")
@@ -635,7 +634,7 @@ def main():
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
-    train()
+    # train()
     test()
 
 
