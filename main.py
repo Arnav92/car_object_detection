@@ -709,7 +709,7 @@ def test():
         print(f"  - {m} best weights: {art['best_weights']}")
         print(f"  - {m} results.csv:  {art['results_csv']}")
         print(f"  - Test CSV:         {test_csvs[m]}")
-    print(f"Personal images report written: {personal_report}")
+    print(f"  - Personal images report written:       {personal_report}")
     print(f"  - Report PDF:       {REPORT_PDF}")
 
 
