@@ -56,7 +56,6 @@ plt.grid(True, linestyle="--", alpha=0.6)
 pdf.savefig()
 plt.close()
 
-# Close PDF file
 pdf.close()
 
-print(f"✅ Saved histograms to {output_pdf}")
+print(f"Saved histograms to {output_pdf}")

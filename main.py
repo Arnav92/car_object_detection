@@ -4,16 +4,19 @@
 # 3) Trains two models:
 #    - "YOLO"  -> yolov8s (more accurate, slower)
 #    - "FastYOLO" -> yolov8n (faster, smaller)
+#    - "UnpretrainedYOLO" -> yolov8s.yaml (no pretraining)
 # 4) Saves trained models to ./models/
 # 5) Runs trained models on test images and writes test_predictions.csv
-# 6) Generates a PDF report with loss curves and detection samples per model
+# 6) Generates a PDF report with loss curves, detection samples, AND speed graphs
+#    (inference ms, FPS, FLOPs) for validation and test sets.
 #
 # Notes:
-# - In the "main" function, the "train" functon is commented out. This is because
-# training has already been done. If you want to examine training, uncomment that
-# line and delete all files except main.py and the "data" folder
-# - KFOLD is work in progress - might not do
-# - If models already exist, they will be reused; otherwise they are downloaded.
+# - In the "main" function, the "train" function is commented out. Training is assumed
+#   to have been done; if you want to re-train, uncomment it. The script will reuse
+#   weights if found under ./models/ or workspace runs.
+# - Speed measurements: warmup (default 10), per-image timing, report p50 & p95 latencies,
+#   FPS computed from median latency. FLOPs estimated via Ultralytics model.info() or
+#   via thop if available.
 # ---------------------------------------------------------------
 
 import os
@@ -37,6 +40,9 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.model_selection import train_test_split, KFold
+import statistics
+import re
+
 # Defining plot style
 font = {'weight': 'bold', 'size': 11}
 matplotlib.rc('font', **font)
@@ -53,6 +59,7 @@ PERSONAL_DIR = os.path.join(DATA_DIR, "personal_images")
 WORKSPACE = "workspace"  # we'll build YOLOv8 format dataset here
 MODELS_DIR = "models"    # store/check pretrained + trained weights here
 REPORT_PDF = "car_detection_report.pdf"
+SPEED_JSON = "speed_metrics.json"
 
 # Training settings
 EPOCHS = 20
@@ -399,7 +406,7 @@ def read_results_csv(results_csv: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------
-# Inference + outputs
+# Inference + outputs + speed measurement
 # ---------------------------------------------------------------
 def predict_test_and_save_csv(weights_path: str, test_images_dir: str, out_csv: str) -> pd.DataFrame:
     """
@@ -472,8 +479,163 @@ def sample_detection_grid(weights_path: str, images_dir: str, n: int = 8, seed: 
     return fig
 
 
+def _parse_flops_from_info_string(info_str: str) -> float:
+    """Try to parse GFLOPs from a variety of possible info() string formats. Returns GFLOPs or None."""
+    if not info_str:
+        return None
+    # Look for patterns like 'GFLOPs: 12.34', 'GFlops: 12.34', 'GFLOPS: 12.34', 'GFLOPs', 'GMac'
+    m = re.search(r"([0-9]+\.?[0-9]*)\s*(G|g)FLOP|([0-9]+\.?[0-9]*)\s*(G|g)FLOP|([0-9]+\.?[0-9]*)\s*(G|g)Mac", info_str)
+    if m:
+        # find first float in the string
+        m2 = re.search(r"([0-9]+\.?[0-9]*)", info_str)
+        if m2:
+            try:
+                val = float(m2.group(1))
+                return float(val)
+            except Exception:
+                return None
+    # fallback: look for 'GFLOPs: X'
+    m3 = re.search(r"GFLOP[s]?:\s*([0-9]+\.?[0-9]*)", info_str, flags=re.IGNORECASE)
+    if m3:
+        return float(m3.group(1))
+    # nothing found
+    return None
+
+
+def estimate_flops(model: YOLO, imgsz: int = 640) -> float:
+    """
+    Attempt multiple strategies to estimate GC FLOPs for the model. Returns GFLOPs (float) or None.
+    Strategies (in order):
+      - Use Ultralytics model.info(...) when available and parse the string.
+      - If thop is installed, attempt to use it as a fallback.
+    """
+    # 1) try ultralytics info() on model.model or model itself
+    try:
+        # newer ultralytics: model.model.info or model.info
+        info_str = None
+        if hasattr(model, "model") and hasattr(model.model, "info"):
+            try:
+                # some versions print info; capture stdout by calling and retrieving returned string
+                info_out = model.model.info(verbose=False, imgsz=imgsz)
+                if isinstance(info_out, str):
+                    info_str = info_out
+            except Exception:
+                # try model.info
+                try:
+                    info_out2 = model.info(verbose=False, imgsz=imgsz)
+                    if isinstance(info_out2, str):
+                        info_str = info_out2
+                except Exception:
+                    info_str = None
+        else:
+            try:
+                info_out2 = model.info(verbose=False, imgsz=imgsz)
+                if isinstance(info_out2, str):
+                    info_str = info_out2
+            except Exception:
+                info_str = None
+
+        if info_str:
+            flops = _parse_flops_from_info_string(info_str)
+            if flops is not None:
+                return flops
+    except Exception:
+        pass
+
+    # 2) try thop if available
+    try:
+        from thop import profile
+        import torch
+        model_pt = model.model if hasattr(model, "model") else None
+        if model_pt is None:
+            return None
+        model_pt.eval()
+        device = next(model_pt.parameters()).device if len(list(model_pt.parameters()))>0 else torch.device('cpu')
+        input_tensor = torch.randn(1, 3, imgsz, imgsz).to(device)
+        macs, params = profile(model_pt, inputs=(input_tensor,), verbose=False)
+        # thop reports MACs; FLOPs often considered 2*MACs but convention varies; we'll convert MACs to FLOPs by *2
+        flops = float(macs) * 2.0 / 1e9
+        return flops
+    except Exception:
+        pass
+
+    return None
+
+
+def measure_model_speed_and_flops(weights_path: str, images_dir: str, imgsz: int = IMGSZ,
+                                  warmup: int = 10, max_images: int = None) -> Dict:
+    """
+    Measures per-image inference times (ms) for every image in images_dir (or up to max_images if set).
+    Also attempts to estimate FLOPs (GFLOPs) for the model.
+
+    Returns dictionary with keys: latencies_ms (list), p50, p95, median_ms, total_time_s, fps_median, throughput_fps, flops_g
+    """
+    weights_path = normalize_path(weights_path)
+    images_dir = normalize_path(images_dir)
+    imgs = list_images(images_dir)
+    if max_images is not None and max_images > 0:
+        imgs = imgs[:max_images]
+
+    model = YOLO(weights_path)
+
+    # warm-up using the first available image (or a blank tensor if none)
+    if len(imgs) > 0:
+        warm_img = imgs[0]
+        print(f"Warming up {weights_path} with {warmup} runs on {os.path.basename(warm_img)} ...")
+        for _ in range(warmup):
+            try:
+                _ = model.predict(source=warm_img, imgsz=imgsz, verbose=False)[0]
+            except Exception:
+                pass
+    else:
+        print("No images to measure speed on for", images_dir)
+
+    latencies = []
+    total_start = time.perf_counter()
+    for p in imgs:
+        try:
+            t0 = time.perf_counter()
+            _ = model.predict(source=p, imgsz=imgsz, verbose=False)[0]
+            t1 = time.perf_counter()
+            lat_ms = (t1 - t0) * 1000.0
+            latencies.append(lat_ms)
+        except Exception as e:
+            print(f"Warning: prediction failed for {p}: {e}")
+    total_end = time.perf_counter()
+
+    metrics = {}
+    if len(latencies) > 0:
+        metrics['latencies_ms'] = latencies
+        metrics['p50_ms'] = float(np.percentile(latencies, 50))
+        metrics['p95_ms'] = float(np.percentile(latencies, 95))
+        metrics['median_ms'] = float(np.median(latencies))
+        metrics['mean_ms'] = float(np.mean(latencies))
+        total_time = float(total_end - total_start)
+        metrics['total_time_s'] = total_time
+        metrics['throughput_fps'] = float(len(latencies) / total_time) if total_time > 0 else None
+        metrics['fps_from_median'] = float(1000.0 / metrics['median_ms']) if metrics['median_ms'] > 0 else None
+    else:
+        metrics['latencies_ms'] = []
+        metrics['p50_ms'] = None
+        metrics['p95_ms'] = None
+        metrics['median_ms'] = None
+        metrics['mean_ms'] = None
+        metrics['total_time_s'] = 0.0
+        metrics['throughput_fps'] = None
+        metrics['fps_from_median'] = None
+
+    # FLOPs
+    try:
+        flops = estimate_flops(model, imgsz=imgsz)
+        metrics['flops_g'] = float(flops) if flops is not None else None
+    except Exception:
+        metrics['flops_g'] = None
+
+    return metrics
+
+
 # ---------------------------------------------------------------
-# Report generation (PDF with per-model sections)
+# Report generation (PDF with per-model sections + speed graphs)
 # ---------------------------------------------------------------
 def plot_training_curves(results_df: pd.DataFrame, model_label: str):
     """
@@ -529,8 +691,38 @@ def generate_pdf_report(per_model_artifacts: Dict[str, Dict[str, str]], out_pdf:
     For each model:
       - add training curves page
       - add grid of detection samples page
-    Also include a title/summary page.
+    Also include a title/summary page and additional pages with speed graphs for
+    validation and test metrics (inference ms, FPS, FLOPs).
     """
+    # Aggregate metrics for plotting
+    models = list(per_model_artifacts.keys())
+
+    # Build metric tables for val and test
+    val_meds = []
+    val_p95 = []
+    val_fps = []
+    val_flops = []
+
+    test_meds = []
+    test_p95 = []
+    test_fps = []
+    test_flops = []
+
+    for m in models:
+        art = per_model_artifacts[m]
+        metrics = art.get('metrics', {})
+        val = metrics.get('val', {}) if metrics else {}
+        test = metrics.get('test', {}) if metrics else {}
+        val_meds.append(val.get('median_ms'))
+        val_p95.append(val.get('p95_ms'))
+        val_fps.append(val.get('fps_from_median'))
+        val_flops.append(val.get('flops_g'))
+
+        test_meds.append(test.get('median_ms'))
+        test_p95.append(test.get('p95_ms'))
+        test_fps.append(test.get('fps_from_median'))
+        test_flops.append(test.get('flops_g'))
+
     with PdfPages(out_pdf) as pdf:
         # Title page
         fig = plt.figure(figsize=(11.7, 8.3))
@@ -538,7 +730,7 @@ def generate_pdf_report(per_model_artifacts: Dict[str, Dict[str, str]], out_pdf:
         lines = [
             "Models: YOLO (yolov8s) and FastYOLO (yolov8n) and UnpretrainedYOLO",
             "Dataset: Kaggle Car Object Detection (converted to YOLO format)",
-            "Outputs: test_predictions.csv, trained weights, curves, sample detections",
+            "Outputs: test_predictions.csv, trained weights, curves, sample detections, speed metrics",
             f"Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}"
         ]
         for i, line in enumerate(lines):
@@ -546,23 +738,71 @@ def generate_pdf_report(per_model_artifacts: Dict[str, Dict[str, str]], out_pdf:
         plt.axis('off')
         pdf.savefig(fig); plt.close(fig)
 
-        # Per-model sections
+        # Per-model sections (curves + samples)
         for model_label, art in per_model_artifacts.items():
             # Curves
-            df = read_results_csv(art["results_csv"])
+            df = read_results_csv(art.get("results_csv", ""))
             fig_curves = plot_training_curves(df, model_label)
             pdf.savefig(fig_curves)
             plt.close(fig_curves)
 
-            # Sample detections (use VAL images to visualize)
-            # If val empty, fall back to test
+            # Sample detections (use VAL images to visualize, fallback to test)
             vis_dir = dataset_preview_dir
-            fig_samples = sample_detection_grid(art["best_weights"], vis_dir, n=24)
+            fig_samples = sample_detection_grid(art.get("best_weights"), vis_dir, n=24)
             fig_samples.suptitle(f"{model_label} — Sample Detections", fontsize=14, y=1.02)
             pdf.savefig(fig_samples)
             plt.close(fig_samples)
 
+        # ===== Additional pages: Speed graphs =====
+        # Validation metrics page
+        fig_val = plt.figure(figsize=(11.7, 8.3))
+        fig_val.suptitle("Speed Metrics — Validation Set", fontsize=16)
+        ax1 = fig_val.add_subplot(3, 1, 1)
+        ax2 = fig_val.add_subplot(3, 1, 2)
+        ax3 = fig_val.add_subplot(3, 1, 3)
+
+        x = np.arange(len(models))
+        # median latency (ms)
+        ax1.bar(x, [v if v is not None else 0 for v in val_meds])
+        ax1.set_xticks(x); ax1.set_xticklabels(models)
+        ax1.set_ylabel('Median Latency (ms)')
+        # fps
+        ax2.bar(x, [v if v is not None else 0 for v in val_fps])
+        ax2.set_xticks(x); ax2.set_xticklabels(models)
+        ax2.set_ylabel('FPS (from median latency)')
+        # flops
+        ax3.bar(x, [v if v is not None else 0 for v in val_flops])
+        ax3.set_xticks(x); ax3.set_xticklabels(models)
+        ax3.set_ylabel('FLOPs (G)')
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        pdf.savefig(fig_val); plt.close(fig_val)
+
+        # Test metrics page
+        fig_test = plt.figure(figsize=(11.7, 8.3))
+        fig_test.suptitle("Speed Metrics — Test Set", fontsize=16)
+        ax1 = fig_test.add_subplot(3, 1, 1)
+        ax2 = fig_test.add_subplot(3, 1, 2)
+        ax3 = fig_test.add_subplot(3, 1, 3)
+
+        x = np.arange(len(models))
+        ax1.bar(x, [v if v is not None else 0 for v in test_meds])
+        ax1.set_xticks(x); ax1.set_xticklabels(models)
+        ax1.set_ylabel('Median Latency (ms)')
+
+        ax2.bar(x, [v if v is not None else 0 for v in test_fps])
+        ax2.set_xticks(x); ax2.set_xticklabels(models)
+        ax2.set_ylabel('FPS (from median latency)')
+
+        ax3.bar(x, [v if v is not None else 0 for v in test_flops])
+        ax3.set_xticks(x); ax3.set_xticklabels(models)
+        ax3.set_ylabel('FLOPs (G)')
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        pdf.savefig(fig_test); plt.close(fig_test)
+
     print(f"Saved report: {out_pdf}")
+
 
 def generate_personal_images_report(per_model_artifacts: Dict[str, Dict[str, str]],
                                     out_pdf: str = "personal_images_report.pdf",
@@ -647,6 +887,7 @@ def generate_personal_images_report(per_model_artifacts: Dict[str, Dict[str, str
     print(f"Saved personal images report: {out_pdf}")
     return out_pdf
 
+
 def train():
     # Sanity checks - must exist for program to work
     ensure_dir_with_msg(TRAIN_IMAGES_DIR, f"Expected training images at {TRAIN_IMAGES_DIR}")
@@ -659,7 +900,7 @@ def train():
     # 1) Load CSV and build YOLO dataset structure
     print("Loading training CSV and preparing YOLO dataset ...")
     grouped = load_and_group_training_csv(TRAIN_CSV)
-    ds_paths = build_yolo_dataset_structure(
+    ds_paths_local = build_yolo_dataset_structure(
         grouped_df=grouped,
         train_images_root=TRAIN_IMAGES_DIR,
         test_images_root=TEST_IMAGES_DIR,
@@ -667,10 +908,10 @@ def train():
         val_ratio=VAL_SPLIT,
         seed=RANDOM_SEED
     )
-    dataset_yaml = ds_paths["dataset_yaml"]
+    dataset_yaml = ds_paths_local["dataset_yaml"]
 
     # 2) Train models
-    per_model = {}
+    trained = {}
     for cfg in MODEL_CONFIGS:
         # Ensure pretrained weights locally (or use cache)
         pretrained_local_or_name = get_or_download_pretrained(cfg["pretrained"], MODELS_DIR)
@@ -683,12 +924,24 @@ def train():
             batch=BATCH_SIZE,
             imgsz=IMGSZ
         )
-        per_model[cfg["name"]] = art
+        trained[cfg["name"]] = art
+
+    # Update global per_model mapping if needed
+    for k, v in trained.items():
+        per_model[k] = v
 
 
 def test():
     # 3) Run inference on TEST and write CSV (one per model, so you can compare)
     test_csvs = {}
+    # Ensure ds_paths exist on disk
+    ensure_dir_with_msg(ds_paths['test_images'], f"Expected dataset test images at {ds_paths['test_images']}")
+    # Use VAL images for visualization if available
+    val_dir = ds_paths.get('val_images')
+    if not os.path.exists(val_dir) or len(list_images(val_dir)) == 0:
+        # fallback
+        val_dir = ds_paths.get('test_images')
+
     for cfg in MODEL_CONFIGS:
         model_label = cfg["name"]
         weights = per_model[model_label]["best_weights"]
@@ -696,12 +949,34 @@ def test():
         predict_test_and_save_csv(weights, ds_paths["test_images"], out_csv)
         test_csvs[model_label] = out_csv
 
+    # 3.5) Measure speed + flops for VAL and TEST (per-model)
+    print("\nMeasuring speed and FLOPs for each model on validation and test sets ...")
+    for cfg in MODEL_CONFIGS:
+        model_label = cfg["name"]
+        weights = per_model[model_label]["best_weights"]
+        # val
+        val_metrics = measure_model_speed_and_flops(weights, ds_paths['val_images'], imgsz=IMGSZ, warmup=10)
+        # test
+        test_metrics = measure_model_speed_and_flops(weights, ds_paths['test_images'], imgsz=IMGSZ, warmup=10)
+        # attach
+        per_model[model_label]['metrics'] = {'val': val_metrics, 'test': test_metrics}
+
+    # dump metrics to JSON for easy inspection
+    try:
+        with open(SPEED_JSON, 'w', encoding='utf-8') as f:
+            json.dump({k: v.get('metrics', {}) for k, v in per_model.items()}, f, indent=2)
+        print(f"Wrote speed metrics to {SPEED_JSON}")
+    except Exception as e:
+        print(f"Could not write speed metrics JSON: {e}")
+
     # 4) Generate PDF report with curves + samples (use VAL images for samples)
-    #    If val is empty (tiny datasets), we can also pick from train or test.
-    test_dir = ds_paths["test_images"]
-    generate_pdf_report(per_model, REPORT_PDF, dataset_preview_dir=test_dir)
-    personal_report = generate_personal_images_report(per_model, out_pdf="personal_images_report.pdf",
-                                                      personal_images_dir=PERSONAL_DIR)
+    dataset_preview = val_dir
+    generate_pdf_report(per_model, REPORT_PDF, dataset_preview_dir=dataset_preview)
+    personal_report = generate_personal_images_report(
+        per_model,
+        out_pdf="personal_images_report.pdf",
+        personal_images_dir=PERSONAL_DIR
+    )
 
     print("\nAll done!")
     print("Artifacts created:")
@@ -709,6 +984,9 @@ def test():
         print(f"  - {m} best weights: {art['best_weights']}")
         print(f"  - {m} results.csv:  {art['results_csv']}")
         print(f"  - Test CSV:         {test_csvs[m]}")
+        if 'metrics' in art:
+            print(f"    - Metrics (val): median={art['metrics']['val'].get('median_ms')} ms, p95={art['metrics']['val'].get('p95_ms')} ms, flops={art['metrics']['val'].get('flops_g')}")
+            print(f"    - Metrics (test): median={art['metrics']['test'].get('median_ms')} ms, p95={art['metrics']['test'].get('p95_ms')} ms, flops={art['metrics']['test'].get('flops_g')}")
     print(f"  - Personal images report written:       {personal_report}")
     print(f"  - Report PDF:       {REPORT_PDF}")
 
