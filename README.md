@@ -100,3 +100,4 @@ Where all data and models are organized. The `test/`, `train/`, and `val/` subdi
 - **`setup.py`** - Downloads and sets up all required files
 - **`speed_metrics.json`** - Contains performance speed information for all models, generated in `main.py` 
 - **`.csv files`** - Raw bounding box prediction values from all models
+- **`.pt files`** - Pretrained YOLO models to use for training
