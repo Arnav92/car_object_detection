@@ -664,14 +664,13 @@ def plot_training_curves(results_df: pd.DataFrame, model_label: str):
     epoch = results_df.get("epoch", pd.Series(range(len(results_df))))
     ax3.set_xlabel("Epoch"); ax3.set_ylabel("FPS")
     ax3.grid(True)
+
     if "speed/val_fps" in results_df.columns:
-        ax3b = ax3.twinx()
-        ax3b.plot(epoch, results_df["speed/val_fps"], marker="o", label="FPS (from median)")
-        lines, labels = ax3.get_legend_handles_labels()
-        lines2, labels2 = ax3b.get_legend_handles_labels()
-        ax3.legend(lines + lines2, labels + labels2, loc="upper right")
-    else:
-        ax3.legend(loc="upper right")
+        ax3.plot(epoch, results_df["speed/val_fps"], label="Val FPS", color="tab:blue")
+    if "speed/train_fps" in results_df.columns:
+        ax3.plot(epoch, results_df["speed/train_fps"], label="Train FPS", color="tab:orange")
+
+    ax3.legend(loc="upper right")
 
     plt.tight_layout()
     return fig
