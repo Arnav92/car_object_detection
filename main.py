@@ -660,16 +660,13 @@ def plot_training_curves(results_df: pd.DataFrame, model_label: str):
                 ax2.plot(epoch, results_df[col], label=nice)
     ax2.set_xlabel("Epoch"); ax2.set_ylabel("Metric"); ax2.legend(loc="lower right")
 
-    ax3.set_title(f"{model_label} — Speed over Epochs (median latency = inference ms)")
+    ax3.set_title(f"{model_label} — Speed over Epochs")
     epoch = results_df.get("epoch", pd.Series(range(len(results_df))))
-    if "speed/val_median_ms" in results_df.columns:
-        ax3.plot(epoch, results_df["speed/val_median_ms"], marker="o", label="Median Latency (inference ms)")
-    ax3.set_xlabel("Epoch"); ax3.set_ylabel("Median Latency (ms)")
+    ax3.set_xlabel("Epoch"); ax3.set_ylabel("FPS")
     ax3.grid(True)
     if "speed/val_fps" in results_df.columns:
         ax3b = ax3.twinx()
-        ax3b.plot(epoch, results_df["speed/val_fps"], marker="x", linestyle="--", label="FPS (from median)")
-        ax3b.set_ylabel("FPS")
+        ax3b.plot(epoch, results_df["speed/val_fps"], marker="o", label="FPS (from median)")
         lines, labels = ax3.get_legend_handles_labels()
         lines2, labels2 = ax3b.get_legend_handles_labels()
         ax3.legend(lines + lines2, labels + labels2, loc="upper right")
