@@ -864,16 +864,14 @@ def train():
 def test():
     test_csvs = {}
     ensure_dir_with_msg(ds_paths['test_images'], f"Expected dataset test images at {ds_paths['test_images']}")
-    val_dir = ds_paths.get('val_images')
-    if not os.path.exists(val_dir) or len(list_images(val_dir)) == 0:
-        val_dir = ds_paths.get('test_images')
+    test_dir = ds_paths.get('test_images')
 
     # 1) Run detection on test images and save per-model CSVs
     for cfg in MODEL_CONFIGS:
         model_label = cfg["name"]
         weights = per_model[model_label]["best_weights"]
         out_csv = f"test_predictions_{model_label}.csv"
-        predict_test_and_save_csv(weights, ds_paths["test_images"], out_csv)
+        predict_test_and_save_csv(weights, test_dir, out_csv)
         test_csvs[model_label] = out_csv
 
     # 2) Measure final val/test speed (for final/best weights) and summarize
@@ -924,7 +922,7 @@ def test():
         print(f"Could not write {SPEED_JSON}: {e}")
 
     # 5) Generate PDF report (uses val preview)
-    dataset_preview = val_dir
+    dataset_preview = test_dir
     generate_pdf_report(per_model, REPORT_PDF, dataset_preview_dir=dataset_preview)
 
     # 6) Personal images report
