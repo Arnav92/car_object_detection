@@ -44,6 +44,7 @@ except Exception:
 DATA_DIR = os.path.join("data")
 TRAIN_CSV = os.path.join(DATA_DIR, "train_solution_bounding_boxes (1).csv")
 TRAIN_IMAGES_DIR = os.path.join(DATA_DIR, "training_images")
+PERSONAL_IMAGES_DIR = os.path.join(DATA_DIR, "personal_images")
 
 WORKSPACE = "workspace"
 MODEL_CONFIGS = [
@@ -460,7 +461,28 @@ def plot_histograms_and_example_image(output_pdf: str = HISTOGRAMS_PDF):
     print(f"Saved histograms + example image to {output_pdf}")
 
 
-# ----------------- Main -----------------
+def rename_personal_files():
+    """Renaming all files in ./data/personal_images"""
+    # List all files in the folder
+    files = [f for f in os.listdir(PERSONAL_IMAGES_DIR) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+
+    # Sort files alphabetically so numbering is consistent
+    files.sort()
+
+    # Rename each file
+    for idx, filename in enumerate(files, start=1):
+        # Always save as .jpeg
+        new_name = f"{idx}.jpeg"
+        old_path = os.path.join(PERSONAL_IMAGES_DIR, filename)
+        new_path = os.path.join(PERSONAL_IMAGES_DIR, new_name)
+
+        # Rename (overwrite if duplicate exists)
+        os.rename(old_path, new_path)
+        print(f"Renamed {filename} → {new_name}")
+
+    print("✅ Renaming completed!")
+
+
 def main():
     print("Generating histograms + example image ...")
     try:
@@ -476,4 +498,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    rename_personal_files()
