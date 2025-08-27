@@ -3,11 +3,14 @@
 extra.py
 
 Regression analysis on metric *differences* between model pairs (YOLO, FastYOLO, UnpretrainedYOLO).
-Generates a PDF with a plot per (pair, metric) showing epoch vs difference and the fitted linear
-regression line; annotates slope, intercept, p-values, R^2, and a short conclusion about
-statistical significance — with annotations placed below the plot (no overlap).
+Generates a PDF with a page per (pair, metric) showing:
 
-Also contains histogram + example single-box image code.
+  - LEFT: epoch vs metric for both models (points + per-model linear fit)
+  - RIGHT: epoch vs (A - B) difference (points + linear fit)
+  - BOTTOM: textual stats (slope/intercept/p-values/R^2/etc.) placed below the two plots
+    so text never overlaps the plots.
+
+Also contains histogram + example single-box image code and a helper to rename personal images.
 
 Outputs:
 - data/regression_report.pdf
@@ -21,7 +24,7 @@ import os
 import glob
 import math
 import warnings
-from typing import Dict, Tuple
+from typing import Dict
 
 import numpy as np
 import pandas as pd
@@ -123,6 +126,7 @@ def robust_read_results_csv(path: str) -> pd.DataFrame:
     # coerce to numeric and drop rows without epoch
     df["epoch"] = pd.to_numeric(df["epoch"], errors="coerce")
     df = df.dropna(subset=["epoch"]).copy()
+    # convert to int safely
     df["epoch"] = df["epoch"].astype(int)
     return df
 
@@ -136,8 +140,11 @@ def linear_regression_stats(x: np.ndarray, y: np.ndarray) -> Dict:
     y = np.asarray(y, dtype=float)
     n = len(x)
     if n < 2:
-        return {"n": n, "slope": None, "intercept": None, "se_slope": None, "se_intercept": None,
-                "t_slope": None, "p_slope": None, "t_intercept": None, "p_intercept": None, "r2": None}
+        # return all keys with None-friendly values
+        return {
+            "n": int(n), "slope": None, "intercept": None, "se_slope": None, "se_intercept": None,
+            "t_slope": None, "p_slope": None, "t_intercept": None, "p_intercept": None, "r2": None
+        }
     x_mean = x.mean()
     y_mean = y.mean()
     Sxx = np.sum((x - x_mean) ** 2)
@@ -206,7 +213,8 @@ def format_val(v, fmt: str = ".6f"):
 def run_regression_analysis_and_report(output_pdf: str = REGRESSION_PDF,
                                        summary_csv: str = REGRESSION_SUMMARY_CSV):
     """
-    Orchestrates regression analysis and PDF summary.
+    Orchestrates regression analysis and PDF summary with LEFT=per-model plots and RIGHT=difference plots,
+    and BOTTOM=text area containing stats (no overlap).
     """
     # 1) Find results.csv for each model
     model_results = {}
@@ -267,8 +275,16 @@ def run_regression_analysis_and_report(output_pdf: str = REGRESSION_PDF,
             for metric in metrics_to_use:
                 colA = metric + f".{A}"
                 colB = metric + f".{B}"
+                # columns in merged will be exactly metric names (no suffix) if original dfs had same column names;
+                # but we merged so need to refer to original metric names. If metric isn't present with suffix we try original names:
+                if colA not in merged.columns and metric in merged.columns:
+                    colA = metric
+                    colB = metric  # both refer to same column names - but merged contains duplicates; adjust:
+                    # If this fallback happens (rare), rename columns from A/B dfs before merging would be better.
                 if colA not in merged.columns or colB not in merged.columns:
                     # skip if missing in merged
+                    # Usually merged will contain e.g. "metrics/mAP50(B).YOLO" style; earlier code sets suffixes.
+                    # If metric missing, continue.
                     continue
 
                 # coerce numeric and drop NA
@@ -280,89 +296,143 @@ def run_regression_analysis_and_report(output_pdf: str = REGRESSION_PDF,
                     print(f"Not enough data for {A} vs {B} on metric {metric}; need >=2 rows.")
                     continue
 
+                # prepare per-model series for left plot
+                A_df = sub[["epoch", colA]].dropna().copy()
+                B_df = sub[["epoch", colB]].dropna().copy()
+
+                # compute per-model regression stats
+                stats_A = linear_regression_stats(A_df["epoch"].values, A_df[colA].values) if len(A_df) >= 2 else {
+                    "n": int(len(A_df)), "slope": None, "intercept": None, "se_slope": None, "se_intercept": None,
+                    "t_slope": None, "p_slope": None, "t_intercept": None, "p_intercept": None, "r2": None
+                }
+                stats_B = linear_regression_stats(B_df["epoch"].values, B_df[colB].values) if len(B_df) >= 2 else {
+                    "n": int(len(B_df)), "slope": None, "intercept": None, "se_slope": None, "se_intercept": None,
+                    "t_slope": None, "p_slope": None, "t_intercept": None, "p_intercept": None, "r2": None
+                }
+
+                # diff
                 sub["diff"] = sub[colA] - sub[colB]
                 x = sub["epoch"].values
                 y = sub["diff"].values
-
-                stats = linear_regression_stats(x, y)
+                stats_diff = linear_regression_stats(x, y)
                 alpha = 0.05
-                slope_sig = (stats["p_slope"] is not None and stats["p_slope"] < alpha)
-                intercept_sig = (stats["p_intercept"] is not None and stats["p_intercept"] < alpha)
+                slope_sig = (stats_diff["p_slope"] is not None and stats_diff["p_slope"] < alpha)
+                intercept_sig = (stats_diff["p_intercept"] is not None and stats_diff["p_intercept"] < alpha)
 
-                # Add to summary
+                # Add to summary (store per-pair-diff stats)
                 summary_records.append({
                     "pair": f"{A}_vs_{B}",
                     "metric": metric,
-                    "n": stats["n"],
-                    "slope": stats["slope"],
-                    "se_slope": stats["se_slope"],
-                    "t_slope": stats["t_slope"],
-                    "p_slope": stats["p_slope"],
+                    "n": stats_diff["n"],
+                    "slope": stats_diff["slope"],
+                    "se_slope": stats_diff["se_slope"],
+                    "t_slope": stats_diff["t_slope"],
+                    "p_slope": stats_diff["p_slope"],
                     "slope_significant": slope_sig,
-                    "intercept": stats["intercept"],
-                    "se_intercept": stats["se_intercept"],
-                    "t_intercept": stats["t_intercept"],
-                    "p_intercept": stats["p_intercept"],
+                    "intercept": stats_diff["intercept"],
+                    "se_intercept": stats_diff["se_intercept"],
+                    "t_intercept": stats_diff["t_intercept"],
+                    "p_intercept": stats_diff["p_intercept"],
                     "intercept_significant": intercept_sig,
-                    "r2": stats["r2"]
+                    "r2": stats_diff["r2"]
                 })
 
                 # -----------------------------
-                # Create a page with plot on top and text below
+                # Create a page: top row has LEFT and RIGHT plots; bottom row has text.
                 # -----------------------------
-                fig = plt.figure(figsize=(10, 9))
-                gs = fig.add_gridspec(2, 1, height_ratios=[4, 1], hspace=0.3)
-                ax = fig.add_subplot(gs[0])
-                ax_text = fig.add_subplot(gs[1])
+                fig = plt.figure(figsize=(11.7, 9))  # A4-ish landscape
+                # make bottom row a bit taller to ensure text fits cleanly
+                gs = fig.add_gridspec(2, 2, height_ratios=[4, 1.1], width_ratios=[1, 1], hspace=0.3, wspace=0.35)
+                ax_left = fig.add_subplot(gs[0, 0])
+                ax_right = fig.add_subplot(gs[0, 1])
+                ax_text = fig.add_subplot(gs[1, :])
 
-                # Plot scatter and regression line on ax
-                ax.scatter(x, y, alpha=0.8, label="Observed diff (A - B)")
-                if stats["slope"] is not None:
+                # LEFT: both models points & individual linear fits
+                colors = ("tab:blue", "tab:orange")
+                # plot points
+                ax_left.scatter(A_df["epoch"], A_df[colA], alpha=0.9, label=f"{A} (points)", marker="o", color=colors[0])
+                ax_left.scatter(B_df["epoch"], B_df[colB], alpha=0.9, label=f"{B} (points)", marker="s", color=colors[1])
+                # per-model fit lines (if available)
+                if stats_A.get("slope") is not None and stats_A.get("intercept") is not None:
+                    xsA = np.linspace(A_df["epoch"].min(), A_df["epoch"].max(), 200)
+                    ysA = stats_A["intercept"] + stats_A["slope"] * xsA
+                    ax_left.plot(xsA, ysA, color=colors[0], linestyle="--", label=f"{A} fit")
+                if stats_B.get("slope") is not None and stats_B.get("intercept") is not None:
+                    xsB = np.linspace(B_df["epoch"].min(), B_df["epoch"].max(), 200)
+                    ysB = stats_B["intercept"] + stats_B["slope"] * xsB
+                    ax_left.plot(xsB, ysB, color=colors[1], linestyle="--", label=f"{B} fit")
+                ax_left.set_title(f"{metric} — {A} & {B}")
+                ax_left.set_xlabel("Epoch")
+                ax_left.set_ylabel(metric)
+                ax_left.grid(True)
+                ax_left.legend(loc="best", fontsize=9)
+
+                # RIGHT: difference plot and fit
+                ax_right.scatter(x, y, alpha=0.85, label="Observed diff (A - B)", color="tab:green")
+                if stats_diff.get("slope") is not None and stats_diff.get("intercept") is not None:
                     xs = np.linspace(x.min(), x.max(), 200)
-                    ys = stats["intercept"] + stats["slope"] * xs
-                    ax.plot(xs, ys, label="Fit (linear)", color="red")
-                ax.axhline(0, color="gray", linestyle="--", linewidth=1)
-                ax.set_title(f"{A} − {B} : {metric}")
-                ax.set_xlabel("Epoch")
-                ax.set_ylabel(f"Difference in {metric} (A − B)")
-                ax.grid(True)
-                ax.legend(loc="upper left")
+                    ys = stats_diff["intercept"] + stats_diff["slope"] * xs
+                    ax_right.plot(xs, ys, label="Fit (diff)", color="red")
+                ax_right.axhline(0, color="gray", linestyle="--", linewidth=1)
+                ax_right.set_title(f"{A} − {B} : difference")
+                ax_right.set_xlabel("Epoch")
+                ax_right.set_ylabel(f"Difference ({metric})")
+                ax_right.grid(True)
+                ax_right.legend(loc="best", fontsize=9)
 
-                # Build annotation text block (safe formatting)
-                text_lines = [
-                    f"n = {format_val(stats['n'], '')}",
-                    f"slope = {format_val(stats['slope'])}    (se = {format_val(stats['se_slope'])})",
-                    f"t(slope) = {format_val(stats['t_slope'], '.3f')}    p(slope) = {format_val(stats['p_slope'], '.6f')}",
-                    f"intercept = {format_val(stats['intercept'])}    (se = {format_val(stats['se_intercept'])})",
-                    f"t(intercept) = {format_val(stats['t_intercept'], '.3f')}    p(intercept) = {format_val(stats['p_intercept'], '.6f')}",
-                    f"R² = {format_val(stats['r2'], '.4f')}"
-                ]
-
-                interp_lines = []
-                if stats["p_slope"] is not None:
-                    if slope_sig:
-                        interp_lines.append("Slope ≠ 0 (statistically significant) → metric difference changes with epoch.")
-                    else:
-                        interp_lines.append("Slope ≈ 0 (not significant) → metric difference not correlated with epoch.")
-                else:
-                    interp_lines.append("Slope p-value unavailable; cannot determine significance here.")
-
-                if stats["p_intercept"] is not None:
-                    if intercept_sig:
-                        interp_lines.append("Intercept is significant → persistent baseline difference between models.")
-                    else:
-                        interp_lines.append("Intercept not significant → no consistent baseline difference detected.")
-                else:
-                    interp_lines.append("Intercept p-value unavailable; cannot determine significance here.")
-
-                full_text = "\n".join(text_lines + [""] + interp_lines)
-
-                # Put text in ax_text (below plot). Use monospace for alignment.
+                # BOTTOM: textual block. include both per-model stats and diff stats, with intercept details
                 ax_text.axis("off")
-                # Place text at the top-left of the lower panel, allow newlines.
-                ax_text.text(0.01, 0.98, full_text, fontsize=9, va="top", ha="left", family="monospace")
+                lines = []
+                lines.append(f"PAIR: {A}  vs  {B}     METRIC: {metric}")
+                lines.append("-" * 110)
+                # A stats (include intercept & its stats)
+                lines.append(
+                    f"{A}: n={format_val(stats_A.get('n'), '')}   slope={format_val(stats_A.get('slope'))} (se={format_val(stats_A.get('se_slope'))})   "
+                    f"t={format_val(stats_A.get('t_slope'), '.3f')}   p={format_val(stats_A.get('p_slope'), '.6f')}   R²={format_val(stats_A.get('r2'), '.4f')}"
+                )
+                lines.append(
+                    f"    intercept={format_val(stats_A.get('intercept'))} (se={format_val(stats_A.get('se_intercept'))})   "
+                    f"t={format_val(stats_A.get('t_intercept'), '.3f')}   p={format_val(stats_A.get('p_intercept'), '.6f')}"
+                )
+                # B stats (include intercept & its stats)
+                lines.append(
+                    f"{B}: n={format_val(stats_B.get('n'), '')}   slope={format_val(stats_B.get('slope'))} (se={format_val(stats_B.get('se_slope'))})   "
+                    f"t={format_val(stats_B.get('t_slope'), '.3f')}   p={format_val(stats_B.get('p_slope'), '.6f')}   R²={format_val(stats_B.get('r2'), '.4f')}"
+                )
+                lines.append(
+                    f"    intercept={format_val(stats_B.get('intercept'))} (se={format_val(stats_B.get('se_intercept'))})   "
+                    f"t={format_val(stats_B.get('t_intercept'), '.3f')}   p={format_val(stats_B.get('p_intercept'), '.6f')}"
+                )
+                lines.append("-" * 110)
+                # diff stats
+                lines.append(
+                    f"DIFF (A − B): n={format_val(stats_diff.get('n'), '')}   slope={format_val(stats_diff.get('slope'))} (se={format_val(stats_diff.get('se_slope'))})   "
+                    f"t={format_val(stats_diff.get('t_slope'), '.3f')}   p={format_val(stats_diff.get('p_slope'), '.6f')}   R²={format_val(stats_diff.get('r2'), '.4f')}"
+                )
+                lines.append(
+                    f"    intercept = {format_val(stats_diff.get('intercept'))} (se={format_val(stats_diff.get('se_intercept'))})   "
+                    f"t={format_val(stats_diff.get('t_intercept'), '.3f')}   p={format_val(stats_diff.get('p_intercept'), '.6f')}"
+                )
+                lines.append("")
+                # Interpretation short
+                if stats_diff.get("p_slope") is not None:
+                    if stats_diff["p_slope"] < 0.05:
+                        lines.append("Interpretation: slope is statistically significant → difference changes with epoch.")
+                    else:
+                        lines.append("Interpretation: slope not significant → difference does not systematically change with epoch.")
+                else:
+                    lines.append("Interpretation: slope p-value unavailable in this environment.")
+                if stats_diff.get("p_intercept") is not None:
+                    if stats_diff["p_intercept"] < 0.05:
+                        lines.append("Baseline: intercept significant → persistent baseline difference between models across epochs.")
+                    else:
+                        lines.append("Baseline: intercept not significant → no consistent baseline difference detected.")
+                else:
+                    lines.append("Baseline: intercept p-value unavailable in this environment.")
+                # Render text
+                text_block = "\n".join(lines)
+                ax_text.text(0.01, 0.98, text_block, fontsize=9, va="top", ha="left", family="monospace")
 
-                # Save page
                 pdf.savefig(fig)
                 plt.close(fig)
 
@@ -462,34 +532,32 @@ def plot_histograms_and_example_image(output_pdf: str = HISTOGRAMS_PDF):
 
 
 def rename_personal_files():
-    """Renaming all files in ./data/personal_images"""
+    """Renaming all files in ./data/personal_images to 1.jpeg, 2.jpeg, ..."""
+    if not os.path.exists(PERSONAL_IMAGES_DIR):
+        print(f"Personal images dir not found: {PERSONAL_IMAGES_DIR}")
+        return
     # List all files in the folder
     files = [f for f in os.listdir(PERSONAL_IMAGES_DIR) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
-
     # Sort files alphabetically so numbering is consistent
     files.sort()
-
     # Rename each file
     for idx, filename in enumerate(files, start=1):
         # Always save as .jpeg
         new_name = f"{idx}.jpeg"
         old_path = os.path.join(PERSONAL_IMAGES_DIR, filename)
         new_path = os.path.join(PERSONAL_IMAGES_DIR, new_name)
-
-        # Rename (overwrite if duplicate exists)
-        os.rename(old_path, new_path)
-        print(f"Renamed {filename} → {new_name}")
-
-    print("✅ Renaming completed!")
+        # If destination already exists, attempt to remove it first to avoid OSError
+        try:
+            if os.path.exists(new_path):
+                os.remove(new_path)
+            os.rename(old_path, new_path)
+            print(f"Renamed {filename} → {new_name}")
+        except Exception as e:
+            print(f"Could NOT rename {filename} → {new_name}: {e}")
+    print("Renaming completed!")
 
 
 def main():
-    print("Generating histograms + example image ...")
-    try:
-        plot_histograms_and_example_image(HISTOGRAMS_PDF)
-    except Exception as e:
-        print(f"Histogram generation failed: {e}")
-
     print("Running regression analysis and generating PDF ...")
     try:
         run_regression_analysis_and_report(REGRESSION_PDF, REGRESSION_SUMMARY_CSV)
@@ -498,4 +566,4 @@ def main():
 
 
 if __name__ == "__main__":
-    rename_personal_files()
+    main()
