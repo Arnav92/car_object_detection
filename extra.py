@@ -2,20 +2,9 @@
 """
 extra.py
 
-Regression analysis on metric *differences* between model pairs (YOLO, FastYOLO, UnpretrainedYOLO).
-Generates a PDF with a page per (pair, metric) showing:
-
-  - LEFT: epoch vs metric for both models (points + per-model linear fit)
-  - RIGHT: epoch vs (A - B) difference (points + linear fit)
-  - BOTTOM: textual stats (slope/intercept/p-values/R^2/etc.) placed below the two plots
-    so text never overlaps the plots.
-
-Also contains histogram + example single-box image code and a helper to rename personal images.
-
-Outputs:
-- data/regression_report.pdf
-- data/regression_summary.csv
-- data/data_description_histograms.pdf
+Creates:
+- data/extra.pdf  (histograms + example image + precision vs recall plot)
+- (other helper functions included)
 
 Usage:
     python extra.py
@@ -24,7 +13,7 @@ import os
 import glob
 import math
 import warnings
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -59,7 +48,9 @@ MODEL_CONFIGS = [
 # Where to write outputs
 REGRESSION_PDF = os.path.join(DATA_DIR, "regression_report.pdf")
 REGRESSION_SUMMARY_CSV = os.path.join(DATA_DIR, "regression_summary.csv")
-HISTOGRAMS_PDF = os.path.join(DATA_DIR, "data_description_histograms.pdf")
+EXTRA_PDF = os.path.join(DATA_DIR, "extra.pdf")
+
+SPEED_METRICS = os.path.join("speed_metrics.json")
 
 # Candidate metric columns to attempt (ordered preference)
 CANDIDATE_METRICS = [
@@ -129,6 +120,9 @@ def robust_read_results_csv(path: str) -> pd.DataFrame:
     # convert to int safely
     df["epoch"] = df["epoch"].astype(int)
     return df
+
+def normalize_path(path: str) -> str:
+    return os.path.abspath(path).replace("\\", "/")
 
 
 def linear_regression_stats(x: np.ndarray, y: np.ndarray) -> Dict:
@@ -209,254 +203,79 @@ def format_val(v, fmt: str = ".6f"):
             return "N/A"
 
 
-# ----------------- Regression report -----------------
-def run_regression_analysis_and_report(output_pdf: str = REGRESSION_PDF,
-                                       summary_csv: str = REGRESSION_SUMMARY_CSV):
+# ----------------- New: Precision vs Recall plot across models -----------------
+def plot_precision_vs_recall(pdf: PdfPages):
     """
-    Orchestrates regression analysis and PDF summary with LEFT=per-model plots and RIGHT=difference plots,
-    and BOTTOM=text area containing stats (no overlap).
+    Creates a Precision vs Recall plot with one line per model in MODEL_CONFIGS.
+    Looks for results.csv for each model run and reads metrics/precision(B) and metrics/recall(B).
+    Saves the figure to the provided PdfPages object.
     """
-    # 1) Find results.csv for each model
-    model_results = {}
+    # gather per-model series
+    model_series = {}
     for cfg in MODEL_CONFIGS:
         name = cfg["name"]
         run_name = cfg.get("run_name", "")
-        p = find_results_csv_for_run(run_name)
-        if p:
-            print(f"Found results.csv for {name}: {p}")
-        else:
-            print(f"Warning: results.csv not found for run '{run_name}' (model {name}).")
-        model_results[name] = p
+        path = find_results_csv_for_run(run_name)
+        if not path or not os.path.exists(path):
+            print(f"[PR] results.csv not found for {name} (run '{run_name}'). Skipping.")
+            continue
+        df = robust_read_results_csv(path)
+        # ensure metric columns present
+        pcol = "metrics/precision(B)"
+        rcol = "metrics/recall(B)"
+        if pcol not in df.columns or rcol not in df.columns:
+            print(f"[PR] precision/recall columns missing in {path} for {name}. Skipping.")
+            continue
+        df[pcol] = pd.to_numeric(df[pcol], errors="coerce")
+        df[rcol] = pd.to_numeric(df[rcol], errors="coerce")
+        sub = df.dropna(subset=[pcol, rcol, "epoch"]).copy()
+        if sub.empty:
+            print(f"[PR] no valid precision/recall rows for {name} in {path}. Skipping.")
+            continue
+        model_series[name] = sub.sort_values("epoch")[["epoch", pcol, rcol]]
 
-    # 2) Load dataframes
-    dfs = {}
-    for name, p in model_results.items():
-        dfs[name] = robust_read_results_csv(p) if p else pd.DataFrame()
-
-    # 3) Determine metrics present
-    all_cols = set()
-    for df in dfs.values():
-        if not df.empty:
-            all_cols.update(df.columns.tolist())
-    # choose metrics: intersection with candidate list
-    metrics_to_use = [m for m in CANDIDATE_METRICS if m in all_cols]
-    if not metrics_to_use:
-        # fallback to any metrics/ columns
-        metrics_to_use = sorted([c for c in all_cols if c.startswith("metrics/")])
-    if not metrics_to_use:
-        print("No metrics found in results.csv files to analyze. Exiting regression step.")
+    if not model_series:
+        print("[PR] No model precision/recall data available to plot.")
         return
 
-    print("Metrics to analyze:", metrics_to_use)
+    # Plot
+    fig, ax = plt.subplots(figsize=(8.5, 6))
+    cmap = plt.get_cmap("tab10")
+    for i, (name, s) in enumerate(model_series.items()):
+        recall = s["metrics/recall(B)"].values if "metrics/recall(B)" in s.columns else s.iloc[:, 2].values
+        precision = s["metrics/precision(B)"].values if "metrics/precision(B)" in s.columns else s.iloc[:, 1].values
+        # Plot with lines and markers
+        ax.plot(recall, precision, marker="o", linestyle="-", label=name, color=cmap(i % 10))
+        # annotate epoch numbers lightly
+        for ep, rc, pr in zip(s["epoch"].values, recall, precision):
+            ax.text(rc, pr, str(int(ep)), fontsize=6, alpha=0.6, va="bottom", ha="right")
 
-    pairs = [
-        ("YOLO", "FastYOLO"),
-        ("YOLO", "UnpretrainedYOLO"),
-        ("FastYOLO", "UnpretrainedYOLO")
-    ]
-
-    summary_records = []
-
-    # Start PDF
-    with PdfPages(output_pdf) as pdf:
-        for (A, B) in pairs:
-            dfA = dfs.get(A, pd.DataFrame()).copy()
-            dfB = dfs.get(B, pd.DataFrame()).copy()
-            if dfA.empty or dfB.empty:
-                print(f"Skipping pair {A} vs {B} because one or both result CSVs are missing.")
-                continue
-
-            # perform inner join on epoch
-            merged = pd.merge(dfA, dfB, on="epoch", suffixes=(f".{A}", f".{B}"))
-            if merged.empty:
-                print(f"No overlapping epochs found for {A} vs {B}; skipping.")
-                continue
-
-            for metric in metrics_to_use:
-                colA = metric + f".{A}"
-                colB = metric + f".{B}"
-                # columns in merged will be exactly metric names (no suffix) if original dfs had same column names;
-                # but we merged so need to refer to original metric names. If metric isn't present with suffix we try original names:
-                if colA not in merged.columns and metric in merged.columns:
-                    colA = metric
-                    colB = metric  # both refer to same column names - but merged contains duplicates; adjust:
-                    # If this fallback happens (rare), rename columns from A/B dfs before merging would be better.
-                if colA not in merged.columns or colB not in merged.columns:
-                    # skip if missing in merged
-                    # Usually merged will contain e.g. "metrics/mAP50(B).YOLO" style; earlier code sets suffixes.
-                    # If metric missing, continue.
-                    continue
-
-                # coerce numeric and drop NA
-                merged[colA] = pd.to_numeric(merged[colA], errors="coerce")
-                merged[colB] = pd.to_numeric(merged[colB], errors="coerce")
-                sub = merged.dropna(subset=[colA, colB, "epoch"]).copy()
-                if sub.empty or len(sub) < 2:
-                    # not enough points to regress
-                    print(f"Not enough data for {A} vs {B} on metric {metric}; need >=2 rows.")
-                    continue
-
-                # prepare per-model series for left plot
-                A_df = sub[["epoch", colA]].dropna().copy()
-                B_df = sub[["epoch", colB]].dropna().copy()
-
-                # compute per-model regression stats
-                stats_A = linear_regression_stats(A_df["epoch"].values, A_df[colA].values) if len(A_df) >= 2 else {
-                    "n": int(len(A_df)), "slope": None, "intercept": None, "se_slope": None, "se_intercept": None,
-                    "t_slope": None, "p_slope": None, "t_intercept": None, "p_intercept": None, "r2": None
-                }
-                stats_B = linear_regression_stats(B_df["epoch"].values, B_df[colB].values) if len(B_df) >= 2 else {
-                    "n": int(len(B_df)), "slope": None, "intercept": None, "se_slope": None, "se_intercept": None,
-                    "t_slope": None, "p_slope": None, "t_intercept": None, "p_intercept": None, "r2": None
-                }
-
-                # diff
-                sub["diff"] = sub[colA] - sub[colB]
-                x = sub["epoch"].values
-                y = sub["diff"].values
-                stats_diff = linear_regression_stats(x, y)
-                alpha = 0.05
-                slope_sig = (stats_diff["p_slope"] is not None and stats_diff["p_slope"] < alpha)
-                intercept_sig = (stats_diff["p_intercept"] is not None and stats_diff["p_intercept"] < alpha)
-
-                # Add to summary (store per-pair-diff stats)
-                summary_records.append({
-                    "pair": f"{A}_vs_{B}",
-                    "metric": metric,
-                    "n": stats_diff["n"],
-                    "slope": stats_diff["slope"],
-                    "se_slope": stats_diff["se_slope"],
-                    "t_slope": stats_diff["t_slope"],
-                    "p_slope": stats_diff["p_slope"],
-                    "slope_significant": slope_sig,
-                    "intercept": stats_diff["intercept"],
-                    "se_intercept": stats_diff["se_intercept"],
-                    "t_intercept": stats_diff["t_intercept"],
-                    "p_intercept": stats_diff["p_intercept"],
-                    "intercept_significant": intercept_sig,
-                    "r2": stats_diff["r2"]
-                })
-
-                # -----------------------------
-                # Create a page: top row has LEFT and RIGHT plots; bottom row has text.
-                # -----------------------------
-                fig = plt.figure(figsize=(11.7, 9))  # A4-ish landscape
-                # make bottom row a bit taller to ensure text fits cleanly
-                gs = fig.add_gridspec(2, 2, height_ratios=[4, 1.1], width_ratios=[1, 1], hspace=0.3, wspace=0.35)
-                ax_left = fig.add_subplot(gs[0, 0])
-                ax_right = fig.add_subplot(gs[0, 1])
-                ax_text = fig.add_subplot(gs[1, :])
-
-                # LEFT: both models points & individual linear fits
-                colors = ("tab:blue", "tab:orange")
-                # plot points
-                ax_left.scatter(A_df["epoch"], A_df[colA], alpha=0.9, label=f"{A} (points)", marker="o", color=colors[0])
-                ax_left.scatter(B_df["epoch"], B_df[colB], alpha=0.9, label=f"{B} (points)", marker="s", color=colors[1])
-                # per-model fit lines (if available)
-                if stats_A.get("slope") is not None and stats_A.get("intercept") is not None:
-                    xsA = np.linspace(A_df["epoch"].min(), A_df["epoch"].max(), 200)
-                    ysA = stats_A["intercept"] + stats_A["slope"] * xsA
-                    ax_left.plot(xsA, ysA, color=colors[0], linestyle="--", label=f"{A} fit")
-                if stats_B.get("slope") is not None and stats_B.get("intercept") is not None:
-                    xsB = np.linspace(B_df["epoch"].min(), B_df["epoch"].max(), 200)
-                    ysB = stats_B["intercept"] + stats_B["slope"] * xsB
-                    ax_left.plot(xsB, ysB, color=colors[1], linestyle="--", label=f"{B} fit")
-                ax_left.set_title(f"{metric} — {A} & {B}")
-                ax_left.set_xlabel("Epoch")
-                ax_left.set_ylabel(metric)
-                ax_left.grid(True)
-                ax_left.legend(loc="best", fontsize=9)
-
-                # RIGHT: difference plot and fit
-                ax_right.scatter(x, y, alpha=0.85, label="Observed diff (A - B)", color="tab:green")
-                if stats_diff.get("slope") is not None and stats_diff.get("intercept") is not None:
-                    xs = np.linspace(x.min(), x.max(), 200)
-                    ys = stats_diff["intercept"] + stats_diff["slope"] * xs
-                    ax_right.plot(xs, ys, label="Fit (diff)", color="red")
-                ax_right.axhline(0, color="gray", linestyle="--", linewidth=1)
-                ax_right.set_title(f"{A} − {B} : difference")
-                ax_right.set_xlabel("Epoch")
-                ax_right.set_ylabel(f"Difference ({metric})")
-                ax_right.grid(True)
-                ax_right.legend(loc="best", fontsize=9)
-
-                # BOTTOM: textual block. include both per-model stats and diff stats, with intercept details
-                ax_text.axis("off")
-                lines = []
-                lines.append(f"PAIR: {A}  vs  {B}     METRIC: {metric}")
-                lines.append("-" * 110)
-                # A stats (include intercept & its stats)
-                lines.append(
-                    f"{A}: n={format_val(stats_A.get('n'), '')}   slope={format_val(stats_A.get('slope'))} (se={format_val(stats_A.get('se_slope'))})   "
-                    f"t={format_val(stats_A.get('t_slope'), '.3f')}   p={format_val(stats_A.get('p_slope'), '.6f')}   R²={format_val(stats_A.get('r2'), '.4f')}"
-                )
-                lines.append(
-                    f"    intercept={format_val(stats_A.get('intercept'))} (se={format_val(stats_A.get('se_intercept'))})   "
-                    f"t={format_val(stats_A.get('t_intercept'), '.3f')}   p={format_val(stats_A.get('p_intercept'), '.6f')}"
-                )
-                # B stats (include intercept & its stats)
-                lines.append(
-                    f"{B}: n={format_val(stats_B.get('n'), '')}   slope={format_val(stats_B.get('slope'))} (se={format_val(stats_B.get('se_slope'))})   "
-                    f"t={format_val(stats_B.get('t_slope'), '.3f')}   p={format_val(stats_B.get('p_slope'), '.6f')}   R²={format_val(stats_B.get('r2'), '.4f')}"
-                )
-                lines.append(
-                    f"    intercept={format_val(stats_B.get('intercept'))} (se={format_val(stats_B.get('se_intercept'))})   "
-                    f"t={format_val(stats_B.get('t_intercept'), '.3f')}   p={format_val(stats_B.get('p_intercept'), '.6f')}"
-                )
-                lines.append("-" * 110)
-                # diff stats
-                lines.append(
-                    f"DIFF (A − B): n={format_val(stats_diff.get('n'), '')}   slope={format_val(stats_diff.get('slope'))} (se={format_val(stats_diff.get('se_slope'))})   "
-                    f"t={format_val(stats_diff.get('t_slope'), '.3f')}   p={format_val(stats_diff.get('p_slope'), '.6f')}   R²={format_val(stats_diff.get('r2'), '.4f')}"
-                )
-                lines.append(
-                    f"    intercept = {format_val(stats_diff.get('intercept'))} (se={format_val(stats_diff.get('se_intercept'))})   "
-                    f"t={format_val(stats_diff.get('t_intercept'), '.3f')}   p={format_val(stats_diff.get('p_intercept'), '.6f')}"
-                )
-                lines.append("")
-                # Interpretation short
-                if stats_diff.get("p_slope") is not None:
-                    if stats_diff["p_slope"] < 0.05:
-                        lines.append("Interpretation: slope is statistically significant → difference changes with epoch.")
-                    else:
-                        lines.append("Interpretation: slope not significant → difference does not systematically change with epoch.")
-                else:
-                    lines.append("Interpretation: slope p-value unavailable in this environment.")
-                if stats_diff.get("p_intercept") is not None:
-                    if stats_diff["p_intercept"] < 0.05:
-                        lines.append("Baseline: intercept significant → persistent baseline difference between models across epochs.")
-                    else:
-                        lines.append("Baseline: intercept not significant → no consistent baseline difference detected.")
-                else:
-                    lines.append("Baseline: intercept p-value unavailable in this environment.")
-                # Render text
-                text_block = "\n".join(lines)
-                ax_text.text(0.01, 0.98, text_block, fontsize=9, va="top", ha="left", family="monospace")
-
-                pdf.savefig(fig)
-                plt.close(fig)
-
-    # Write summary CSV
-    if summary_records:
-        try:
-            summary_df = pd.DataFrame(summary_records)
-            summary_df.to_csv(summary_csv, index=False)
-            print(f"Wrote regression summary CSV: {summary_csv}")
-        except Exception as e:
-            print(f"Could not write regression summary CSV: {e}")
-    else:
-        print("No summary records were produced (no regressions ran).")
-
-    print(f"Wrote regression report PDF: {output_pdf}")
+    ax.set_title("Precision vs Recall (per-epoch points labeled by epoch)")
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.relim()
+    ax.autoscale()
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="lower left", fontsize=9)
+    plt.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+    print(f"[PR] Precision-vs-Recall page added to PDF.")
 
 
-# ----------------- Histogram + example image -----------------
-def plot_histograms_and_example_image(output_pdf: str = HISTOGRAMS_PDF):
+# ----------------- Histogram + example image (modified to accept PdfPages) -----------------
+def plot_histograms_and_example_image(pdf: Optional[PdfPages] = None, output_pdf: str = EXTRA_PDF):
+    """
+    If pdf is provided, pages are written to it. Otherwise a new PDF at output_pdf is created.
+    """
+    own_pdf = False
+    if pdf is None:
+        pdf = PdfPages(output_pdf)
+        own_pdf = True
+
     if not os.path.exists(TRAIN_CSV):
         raise FileNotFoundError(f"{TRAIN_CSV} not found.")
     df = pd.read_csv(TRAIN_CSV)
-
-    pdf = PdfPages(output_pdf)
 
     # 1) bounding box areas (normalize by image area)
     image_w = 676
@@ -527,10 +346,14 @@ def plot_histograms_and_example_image(output_pdf: str = HISTOGRAMS_PDF):
     else:
         print("No single-box images found; skipping example image page.")
 
-    pdf.close()
-    print(f"Saved histograms + example image to {output_pdf}")
+    if own_pdf:
+        pdf.close()
+        print(f"Saved histograms + example image to {output_pdf}")
+    else:
+        print("Added histograms + example image pages to provided PdfPages object.")
 
 
+# ----------------- Renaming helper -----------------
 def rename_personal_files():
     """Renaming all files in ./data/personal_images to 1.jpeg, 2.jpeg, ..."""
     if not os.path.exists(PERSONAL_IMAGES_DIR):
@@ -557,12 +380,305 @@ def rename_personal_files():
     print("Renaming completed!")
 
 
+def plot_latency_histograms(pdf: PdfPages, speed_metrics_path: str = SPEED_METRICS):
+    """
+    Read speed_metrics.json and create an overlaid histogram of validation latencies (ms)
+    for each model found in the file. Writes one page to the provided PdfPages object.
+    """
+    import json
+
+    if not os.path.exists(speed_metrics_path):
+        print(f"[LAT] speed metrics file not found: {speed_metrics_path}. Skipping latency histogram.")
+        return
+
+    with open(speed_metrics_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # gather val.latencies_ms for each model key present
+    model_latencies = {}
+    for model_name, model_data in data.items():
+        val = model_data.get("val", {})
+        lat = val.get("latencies_ms") or val.get("latencies") or val.get("latency_ms")
+        if lat and isinstance(lat, list) and len(lat) > 0:
+            # coerce to floats
+            try:
+                lat_f = [float(x) for x in lat]
+            except Exception:
+                lat_f = []
+            if lat_f:
+                model_latencies[model_name] = np.array(lat_f)
+
+    if not model_latencies:
+        print(f"[LAT] No validation latency arrays found in {speed_metrics_path}.")
+        return
+
+    # determine common binning across all models (Freedman–Diaconis rule or fallback)
+    all_vals = np.concatenate(list(model_latencies.values()))
+    q25, q75 = np.percentile(all_vals, [25, 75])
+    iqr = max(q75 - q25, 1e-6)
+    bin_width = 2 * iqr * (len(all_vals) ** (-1/3)) if len(all_vals) > 0 else 1.0
+    if bin_width <= 0 or np.isnan(bin_width):
+        bins = 30
+    else:
+        bins = max(10, int(np.ceil((all_vals.max() - all_vals.min()) / bin_width)))
+    # safety cap for bins
+    bins = min(bins, 100)
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    cmap = plt.get_cmap("tab10")
+    for i, (name, lat_arr) in enumerate(sorted(model_latencies.items())):
+        ax.hist(lat_arr, bins=bins, alpha=0.45, label=f"{name} (n={len(lat_arr)})", density=False,
+                edgecolor="black", linewidth=0.3, color=cmap(i % 10))
+        med = float(np.median(lat_arr))
+        ax.axvline(med, color=cmap(i % 10), linestyle="--", linewidth=1.5)
+        ax.text(med, ax.get_ylim()[1] * (0.85 - 0.08 * (i % 4)), f"med={med:.1f} ms", rotation=90,
+                va="center", ha="right", fontsize=9, color=cmap(i % 10))
+
+    ax.set_title("Validation Latency Histograms (ms) — per-model")
+    ax.set_xlabel("Latency (ms)")
+    ax.set_ylabel("Count")
+    # focus x-axis tightly around observed data (small padding)
+    xmin = float(all_vals.min())
+    xmax = float(all_vals.max())
+    padding = max((xmax - xmin) * 0.03, 1.0)
+    ax.set_xlim(max(0.0, xmin - padding), xmax + padding)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="upper right", fontsize=9)
+    plt.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+    print(f"[LAT] Latency histogram page added to PDF (models: {', '.join(model_latencies.keys())}).")
+
+
+def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max_images: int = None):
+    """
+    For each model in MODEL_CONFIGS:
+      - load best weights from workspace/runs/<run_name>/weights/*.pt (prefers best.pt)
+      - run inference on workspace/val/images (optionally limited by max_images)
+      - compute a detection-style precision-recall curve at the requested IoU threshold
+        using greedy matching (per-image, per-class).
+      - plot all models' PR curves on a single page and write to the provided PdfPages.
+
+    Notes:
+     - This implements standard detection PR calculation: sort all predictions across the
+       dataset by confidence, assign each prediction as TP if it matches an _unmatched_
+       ground-truth box in the same image with IoU >= iou_thresh (and same class),
+       otherwise FP. Precision/recall are then computed from cumulative TP/FP.
+     - Relies on the workspace layout:
+         workspace/val/images/*.jpg
+         workspace/val/labels/*.txt   (YOLO normalized labels: class x_center y_center w h)
+       and runs at:
+         workspace/runs/<run_name>/weights/*.pt
+    """
+    import os
+    import glob
+    from collections import defaultdict
+    from ultralytics import YOLO
+    import cv2
+
+    def find_best_weight_for_run(run_name: str) -> str:
+        wdir = os.path.join(WORKSPACE, "runs", run_name, "weights")
+        if not os.path.isdir(wdir):
+            return ""
+        # prefer best.pt > last.pt > any .pt
+        for candidate in ("best.pt", "last.pt"):
+            p = os.path.join(wdir, candidate)
+            if os.path.exists(p):
+                return p
+        pts = glob.glob(os.path.join(wdir, "*.pt"))
+        return pts[0] if pts else ""
+
+    def read_yolo_labels_for_image(label_path: str, img_w: int, img_h: int):
+        """Return list of (cls, x1,y1,x2,y2) in absolute xyxy coords for one label file."""
+        boxes = []
+        if not os.path.exists(label_path):
+            return boxes
+        with open(label_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 5:
+                    continue
+                cls = int(float(parts[0]))
+                x_center = float(parts[1]) * img_w
+                y_center = float(parts[2]) * img_h
+                w = float(parts[3]) * img_w
+                h = float(parts[4]) * img_h
+                x1 = x_center - w / 2.0
+                y1 = y_center - h / 2.0
+                x2 = x_center + w / 2.0
+                y2 = y_center + h / 2.0
+                boxes.append((cls, max(0.0, x1), max(0.0, y1), min(img_w, x2), min(img_h, y2)))
+        return boxes
+
+    def iou_xyxy(a, b):
+        # a and b are (x1,y1,x2,y2)
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        area_a = max(0.0, (ax2 - ax1) * (ay2 - ay1))
+        area_b = max(0.0, (bx2 - bx1) * (by2 - by1))
+        union = area_a + area_b - inter_area
+        return inter_area / union if union > 0 else 0.0
+
+    # 1) load ground-truths from workspace/val/labels and images
+    val_images_dir = os.path.join(WORKSPACE, "val", "images")
+    val_labels_dir = os.path.join(WORKSPACE, "val", "labels")
+    if not os.path.isdir(val_images_dir) or not os.path.isdir(val_labels_dir):
+        print(f"[PR-IOU] Expected val images/labels under {os.path.join(WORKSPACE, 'val')}; missing folder. Skipping PR.")
+        return
+
+    image_paths = sorted(glob.glob(os.path.join(val_images_dir, "*.*")))
+    if max_images is not None and max_images > 0:
+        image_paths = image_paths[:max_images]
+    if len(image_paths) == 0:
+        print(f"[PR-IOU] No images found in {val_images_dir}; skipping.")
+        return
+
+    gt_by_image = {}  # image_basename -> list of (cls, x1,y1,x2,y2)
+    total_gt = 0
+    for p in image_paths:
+        img_name = os.path.basename(p)
+        img = cv2.imread(p)
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        label_path = os.path.join(val_labels_dir, os.path.splitext(img_name)[0] + ".txt")
+        boxes = read_yolo_labels_for_image(label_path, w, h)
+        gt_by_image[img_name] = boxes
+        total_gt += len(boxes)
+
+    if total_gt == 0:
+        print("[PR-IOU] No ground-truth boxes found in val labels; cannot compute PR.")
+        return
+
+    # 2) For each model, run predictions on val images and collect (image, cls, conf, x1,y1,x2,y2)
+    preds_by_model = {}
+    for cfg in MODEL_CONFIGS:
+        name = cfg.get("name", cfg.get("run_name", "model"))
+        run = cfg.get("run_name", "")
+        wpath = find_best_weight_for_run(run)
+        if not wpath:
+            print(f"[PR-IOU] No weights found for run '{run}' (model {name}); skipping.")
+            continue
+        print(f"[PR-IOU] Running predictions for {name} using weights: {wpath}")
+        model = YOLO(wpath)
+        model_preds = []  # list of dicts: {"image": img_name, "cls":c, "conf":conf, "box":(x1,y1,x2,y2)}
+        for p in image_paths:
+            img_name = os.path.basename(p)
+            try:
+                res = model.predict(source=p, imgsz=imgsz, verbose=False)[0]
+            except Exception as e:
+                print(f"[PR-IOU] predict failed for {p} with model {name}: {e}")
+                continue
+            if getattr(res, "boxes", None) is None or len(res.boxes) == 0:
+                continue
+            xyxy = res.boxes.xyxy.cpu().numpy()
+            confs = res.boxes.conf.cpu().numpy() if hasattr(res.boxes, "conf") else np.ones(len(xyxy))
+            clss = res.boxes.cls.cpu().numpy() if hasattr(res.boxes, "cls") else np.zeros(len(xyxy))
+            for (b, conf, cls) in zip(xyxy, confs, clss):
+                x1, y1, x2, y2 = [float(v) for v in b]
+                model_preds.append({"image": img_name, "cls": int(cls), "conf": float(conf), "box": (x1, y1, x2, y2)})
+        if len(model_preds) == 0:
+            print(f"[PR-IOU] No predictions for {name}; skipping.")
+            continue
+        preds_by_model[name] = model_preds
+
+    if not preds_by_model:
+        print("[PR-IOU] No model predictions collected; skipping PR plotting.")
+        return
+
+    # 3) compute PR curve at the requested IoU using the standard detection approach
+    import numpy as np
+    pr_results = {}  # name -> (precision_array, recall_array)
+
+    for name, preds in preds_by_model.items():
+        # sort preds by confidence desc
+        preds_sorted = sorted(preds, key=lambda x: x["conf"], reverse=True)
+        # prepare matched flags for GTs per image
+        matched_gt = {img: [False] * len(gt_by_image.get(img, [])) for img in gt_by_image.keys()}
+
+        tp = np.zeros(len(preds_sorted), dtype=np.int32)
+        fp = np.zeros(len(preds_sorted), dtype=np.int32)
+
+        for i, pred in enumerate(preds_sorted):
+            img = pred["image"]
+            pcls = pred["cls"]
+            pbox = pred["box"]
+            gts = gt_by_image.get(img, [])
+            best_iou = 0.0
+            best_j = -1
+            for j, gt in enumerate(gts):
+                gcls, gx1, gy1, gx2, gy2 = gt
+                if int(gcls) != int(pcls):
+                    continue
+                if matched_gt.get(img) is None:
+                    continue
+                if matched_gt[img][j]:
+                    continue
+                iouv = iou_xyxy(pbox, (gx1, gy1, gx2, gy2))
+                if iouv > best_iou:
+                    best_iou = iouv
+                    best_j = j
+            if best_iou >= iou_thresh and best_j >= 0:
+                tp[i] = 1
+                matched_gt[img][best_j] = True
+            else:
+                fp[i] = 1
+
+        cum_tp = np.cumsum(tp).astype(np.float32)
+        cum_fp = np.cumsum(fp).astype(np.float32)
+        precisions = cum_tp / (cum_tp + cum_fp + 1e-12)
+        recalls = cum_tp / float(total_gt)
+        pr_results[name] = (precisions, recalls)
+
+    # 4) Plot all PR curves on single figure
+    fig, ax = plt.subplots(figsize=(8.5, 6))
+    cmap = plt.get_cmap("tab10")
+    for i, (name, (prec, rec)) in enumerate(pr_results.items()):
+        if len(prec) == 0 or len(rec) == 0:
+            continue
+        # plot step to mimic PR behaviour
+        ax.step(rec, prec, where='post', label=f"{name} (IoU={iou_thresh})", color=cmap(i % 10))
+        # also plot markers at a few points (every Nth)
+        if len(rec) > 0:
+            idxs = np.linspace(0, len(rec) - 1, min(12, len(rec))).astype(int)
+            ax.plot(rec[idxs], prec[idxs], 'o', markersize=3, color=cmap(i % 10))
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title(f"Precision — Recall curves at IoU = {iou_thresh:.2f}")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="lower left", fontsize=9)
+    plt.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+    print(f"[PR-IOU] PR curves at IoU={iou_thresh} added to PDF (models: {', '.join(pr_results.keys())}).")
+
+
 def main():
-    print("Running regression analysis and generating PDF ...")
-    try:
-        run_regression_analysis_and_report(REGRESSION_PDF, REGRESSION_SUMMARY_CSV)
-    except Exception as e:
-        print(f"Regression analysis failed: {e}")
+    # simple main that produces histograms/example image (existing function) then the PR page
+    with PdfPages(EXTRA_PDF) as pdf:
+        # existing histogram + example image page(s)
+        plot_histograms_and_example_image(pdf=pdf)
+
+        # latency histogram page
+        plot_latency_histograms(pdf=pdf)
+
+        # add PR curves page at chosen IoU
+        IOU = 0.7  # change to desired IoU threshold
+        plot_pr_at_iou(pdf=pdf, iou_thresh=IOU, imgsz=640, max_images=None)
+
+    print(f"Saved combined PDF to {EXTRA_PDF}")
+
+
 
 
 if __name__ == "__main__":
