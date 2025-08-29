@@ -66,6 +66,7 @@ CANDIDATE_METRICS = [
     "speed/val_flops_g"
 ]
 
+IMGSZ = 640
 
 # ----------------- Helpers -----------------
 def find_results_csv_for_run(run_name: str) -> str:
@@ -397,6 +398,9 @@ def plot_latency_histograms(pdf: PdfPages, speed_metrics_path: str = SPEED_METRI
     # gather val.latencies_ms for each model key present
     model_latencies = {}
     for model_name, model_data in data.items():
+        if model_name == "UnpretrainedYOLO":
+            print("UnpretrainedYOLO skipped!")
+            continue
         val = model_data.get("val", {})
         lat = val.get("latencies_ms") or val.get("latencies") or val.get("latency_ms")
         if lat and isinstance(lat, list) and len(lat) > 0:
@@ -450,37 +454,31 @@ def plot_latency_histograms(pdf: PdfPages, speed_metrics_path: str = SPEED_METRI
     print(f"[LAT] Latency histogram page added to PDF (models: {', '.join(model_latencies.keys())}).")
 
 
-def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max_images: int = None):
+def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = IMGSZ, max_images: int = None):
     """
-    For each model in MODEL_CONFIGS:
-      - load best weights from workspace/runs/<run_name>/weights/*.pt (prefers best.pt)
-      - run inference on workspace/val/images (optionally limited by max_images)
-      - compute a detection-style precision-recall curve at the requested IoU threshold
-        using greedy matching (per-image, per-class).
-      - plot all models' PR curves on a single page and write to the provided PdfPages.
+    Compute and plot Precision-Recall curves at a given IoU threshold for all models in MODEL_CONFIGS.
+    Instead of labeling curves with the IoU, this function computes the area under each PR curve
+    (approximate Average Precision) and shows it in the legend (AP ≈ area).
+    Results are written as one page to the provided PdfPages object.
 
     Notes:
-     - This implements standard detection PR calculation: sort all predictions across the
-       dataset by confidence, assign each prediction as TP if it matches an _unmatched_
-       ground-truth box in the same image with IoU >= iou_thresh (and same class),
-       otherwise FP. Precision/recall are then computed from cumulative TP/FP.
-     - Relies on the workspace layout:
-         workspace/val/images/*.jpg
-         workspace/val/labels/*.txt   (YOLO normalized labels: class x_center y_center w h)
-       and runs at:
-         workspace/runs/<run_name>/weights/*.pt
+      - Expects workspace layout:
+          workspace/val/images/*.jpg
+          workspace/val/labels/*.txt   (YOLO normalized labels: class x_center y_center w h)
+        and model weights at:
+          workspace/runs/<run_name>/weights/*.pt
+      - Uses greedy per-image per-class matching: highest-IoU unmatched GT >= iou_thresh counts as TP.
     """
     import os
     import glob
-    from collections import defaultdict
     from ultralytics import YOLO
     import cv2
+    import numpy as np
 
     def find_best_weight_for_run(run_name: str) -> str:
         wdir = os.path.join(WORKSPACE, "runs", run_name, "weights")
         if not os.path.isdir(wdir):
             return ""
-        # prefer best.pt > last.pt > any .pt
         for candidate in ("best.pt", "last.pt"):
             p = os.path.join(wdir, candidate)
             if os.path.exists(p):
@@ -489,7 +487,6 @@ def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max
         return pts[0] if pts else ""
 
     def read_yolo_labels_for_image(label_path: str, img_w: int, img_h: int):
-        """Return list of (cls, x1,y1,x2,y2) in absolute xyxy coords for one label file."""
         boxes = []
         if not os.path.exists(label_path):
             return boxes
@@ -511,7 +508,6 @@ def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max
         return boxes
 
     def iou_xyxy(a, b):
-        # a and b are (x1,y1,x2,y2)
         ax1, ay1, ax2, ay2 = a
         bx1, by1, bx2, by2 = b
         inter_x1 = max(ax1, bx1)
@@ -526,7 +522,7 @@ def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max
         union = area_a + area_b - inter_area
         return inter_area / union if union > 0 else 0.0
 
-    # 1) load ground-truths from workspace/val/labels and images
+    # --- load GTs ---
     val_images_dir = os.path.join(WORKSPACE, "val", "images")
     val_labels_dir = os.path.join(WORKSPACE, "val", "labels")
     if not os.path.isdir(val_images_dir) or not os.path.isdir(val_labels_dir):
@@ -540,7 +536,7 @@ def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max
         print(f"[PR-IOU] No images found in {val_images_dir}; skipping.")
         return
 
-    gt_by_image = {}  # image_basename -> list of (cls, x1,y1,x2,y2)
+    gt_by_image = {}
     total_gt = 0
     for p in image_paths:
         img_name = os.path.basename(p)
@@ -557,7 +553,7 @@ def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max
         print("[PR-IOU] No ground-truth boxes found in val labels; cannot compute PR.")
         return
 
-    # 2) For each model, run predictions on val images and collect (image, cls, conf, x1,y1,x2,y2)
+    # --- run predictions for each model ---
     preds_by_model = {}
     for cfg in MODEL_CONFIGS:
         name = cfg.get("name", cfg.get("run_name", "model"))
@@ -568,7 +564,7 @@ def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max
             continue
         print(f"[PR-IOU] Running predictions for {name} using weights: {wpath}")
         model = YOLO(wpath)
-        model_preds = []  # list of dicts: {"image": img_name, "cls":c, "conf":conf, "box":(x1,y1,x2,y2)}
+        model_preds = []
         for p in image_paths:
             img_name = os.path.basename(p)
             try:
@@ -593,14 +589,10 @@ def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max
         print("[PR-IOU] No model predictions collected; skipping PR plotting.")
         return
 
-    # 3) compute PR curve at the requested IoU using the standard detection approach
-    import numpy as np
-    pr_results = {}  # name -> (precision_array, recall_array)
-
+    # --- compute PR (and AP area) per model ---
+    pr_results = {}  # name -> (precisions, recalls, ap_area)
     for name, preds in preds_by_model.items():
-        # sort preds by confidence desc
         preds_sorted = sorted(preds, key=lambda x: x["conf"], reverse=True)
-        # prepare matched flags for GTs per image
         matched_gt = {img: [False] * len(gt_by_image.get(img, [])) for img in gt_by_image.keys()}
 
         tp = np.zeros(len(preds_sorted), dtype=np.int32)
@@ -635,32 +627,40 @@ def plot_pr_at_iou(pdf: PdfPages, iou_thresh: float = 0.5, imgsz: int = 640, max
         cum_fp = np.cumsum(fp).astype(np.float32)
         precisions = cum_tp / (cum_tp + cum_fp + 1e-12)
         recalls = cum_tp / float(total_gt)
-        pr_results[name] = (precisions, recalls)
 
-    # 4) Plot all PR curves on single figure
+        # ensure monotonic recall (non-decreasing) and proper integration bounds
+        # prepend (0,1) style points commonly used for AP calc
+        rec_for_area = np.concatenate(([0.0], recalls, [1.0]))
+        prec_for_area = np.concatenate(([1.0], precisions, [0.0]))
+        # optional: make precision envelope (monotonic decreasing) for classic AP -- we compute simple trapezoid
+        ap_area = float(np.trapz(prec_for_area, rec_for_area))
+
+        pr_results[name] = (precisions, recalls, ap_area)
+
+    # --- plot ---
     fig, ax = plt.subplots(figsize=(8.5, 6))
     cmap = plt.get_cmap("tab10")
-    for i, (name, (prec, rec)) in enumerate(pr_results.items()):
+    for i, (name, (prec, rec, ap)) in enumerate(pr_results.items()):
         if len(prec) == 0 or len(rec) == 0:
             continue
-        # plot step to mimic PR behaviour
-        ax.step(rec, prec, where='post', label=f"{name} (IoU={iou_thresh})", color=cmap(i % 10))
-        # also plot markers at a few points (every Nth)
-        if len(rec) > 0:
-            idxs = np.linspace(0, len(rec) - 1, min(12, len(rec))).astype(int)
-            ax.plot(rec[idxs], prec[idxs], 'o', markersize=3, color=cmap(i % 10))
+        label = f"{name} (AP≈{ap:.3f})"
+        # plot stepwise PR curve
+        ax.step(rec, prec, where='post', label=label, color=cmap(i % 10))
+        # markers
+        idxs = np.linspace(0, len(rec) - 1, min(12, max(1, len(rec)))).astype(int)
+        ax.plot(rec[idxs], prec[idxs], 'o', markersize=3, color=cmap(i % 10))
 
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.05)
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
-    ax.set_title(f"Precision — Recall curves at IoU = {iou_thresh:.2f}")
+    ax.set_title(f"Precision — Recall curves at IoU = {iou_thresh:.2f} (AP = area under PR curve)")
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="lower left", fontsize=9)
     plt.tight_layout()
     pdf.savefig(fig)
     plt.close(fig)
-    print(f"[PR-IOU] PR curves at IoU={iou_thresh} added to PDF (models: {', '.join(pr_results.keys())}).")
+    print(f"[PR-IOU] PR curves at IoU={iou_thresh:.2f} added to PDF (models: {', '.join(pr_results.keys())}).")
 
 
 def main():
@@ -673,7 +673,7 @@ def main():
         plot_latency_histograms(pdf=pdf)
 
         # add PR curves page at chosen IoU
-        IOU = 0.7  # change to desired IoU threshold
+        IOU = 0.75  # change to desired IoU threshold
         plot_pr_at_iou(pdf=pdf, iou_thresh=IOU, imgsz=640, max_images=None)
 
     print(f"Saved combined PDF to {EXTRA_PDF}")

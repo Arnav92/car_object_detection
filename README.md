@@ -20,7 +20,7 @@ python setup.py
 
 > **Note:** Running `setup.py` can take several minutes to complete.
 
-If the script finishes with the message:
+The script was a success if the console outputs:
 
 ```
 All files extracted into the current folder!
@@ -30,16 +30,19 @@ All files extracted into the current folder!
 
 If `setup.py` fails for any reason:
 
-1. Go to the Google Drive link directly:  
+1. Go to the Google Drive link directly (download "yolov8n.zip"):  
    https://drive.google.com/drive/folders/1hOLUIcf3wY-vp1xabdzFR5pqEj7Nt4ru?hl=de
 
 2. Download and extract the zip.
 
 3. Place the files into the same folder as this README.
 
+Or pull this Github repository:
+https://github.com/Arnav92/car_object_detection
+
 ## Step 3: Alternative Download Source
 
-If Google Drive doesn't work, you can download and extract from here:  
+If Google Drive, nor Github works, you can download and extract from here:  
 https://syncandshare.lrz.de/getlink/fiT88vDosahwxVPBmVtDzk/
 
 **Important:** Make sure that all files downloaded are placed exactly as they appear in the zip file structure in your README file location.
@@ -79,25 +82,35 @@ Once you have the data set up and the folder structure looks correct, you have a
 
 ## File Structure Overview
 
-After setup, your project should contain the following key components:
+After setup, your project contains the following key components.
 
 ### `data/` folder
-Contains all images and bounding boxes for training and testing, including histograms of data analysis. Notably, `personal_images/` contains all images taken in person and tested on the models.
+- Contains all images and bounding boxes for training and testing.
+- `personal_images/` — images taken locally and used to test the models.
+- `extra.pdf` — consolidated data-analysis PDF. This file includes various graphs such as histograms, and an example image showing a class instance with the **average-sized** bounding box.
+- `regression_report.pdf` — for every permutation of models and for every metric in `results.csv`, this report shows:
+  - regression plots of the metric vs. epoch for each model,
+  - the difference in metric values between models,
+  - statistical tests/conclusions on whether any variable is significant.
+
+### `models/` folder
+- Contains downloaded model weight files (e.g. `.pt`) for the YOLO and FastYOLO variants used.
+- All provided model weights are **pretrained on the MS COCO dataset** (these are the COCO-pretrained checkpoints used as starting points).
 
 ### `workspace/` folder
-Where all data and models are organized. The `test/`, `train/`, and `val/` subdirectories are self-explanatory. The `runs/` folder contains important details about all 3 models, including:
-- Model weights
-- Box curves
-- Confusion matrices
-- Raw training results data
-- Example images from training batches
+- Organization used during training and evaluation. Typical structure:
+  - `train/`, `val/`, `test/` — dataset splits used for training and evaluation.
+  - `runs/` — per-run outputs (model weights, training logs, loss/metric curves, confusion matrices, sample training/validation images, etc.).
 
 ### Root directory files
-- **`car_detection_report.pdf`** - Summarizes training results and provides sample test images with bounding boxes from all models
-- **`personal_images_report.pdf`** - Results of testing the models on all images in `./data/personal_images/`
-- **`histogram_maker.py`** - Script that generated the histograms in `./data/data_description_histograms.pdf`
-- **`main.py`** - Main training and testing script that generates the above reports
-- **`setup.py`** - Downloads and sets up all required files
-- **`speed_metrics.json`** - Contains performance speed information for all models, generated in `main.py` 
-- **`.csv files`** - Raw bounding box prediction values from all models
-- **`.pt files`** - Pretrained YOLO models to use for training
+- **`car_detection_report.pdf`** — main report summarizing training results, sample test images, and primary figures.
+- **`personal_images_report.pdf`** — results of testing models on `./data/personal_images/`.
+- **`extra.pdf`** — replaced `histogram_maker.pdf`; contains extra graphs referenced from the report (kept in the appendix).
+- **`extra.py`** — script that generates `extra.pdf` and `regression_report.pdf`.
+- **`main.py`** — main training / evaluation script that produces reports and raw results.
+- **`setup.py`** — download/setup helper (models, required files, etc.).
+- **`speed_metrics.json`** — detailed performance data: stores **per-image latency values** (for validation and test images for every model) and derived summary metrics such as `throughput_fps`, median latency, and other aggregated statistics.
+- **`*.csv`** files — raw detection / bounding-box prediction outputs and `results.csv` (summary metrics used to build `regression_report.pdf`).
+- **`*.pt`** files — model weight files (COCO-pretrained checkpoints and any locally saved checkpoints).
+
+> **Note:** Many images in the .pdf files were not used in the report due to the page limit, but can still provide useful insights!

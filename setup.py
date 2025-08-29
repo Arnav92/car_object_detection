@@ -2,8 +2,8 @@ import gdown
 import zipfile
 import os
 
-url = "https://drive.google.com/uc?id=1tQjfut82kGNj2gN1iALNfY2oxVlkc9l9"
-zip_filename = "car_detection_report.zip"
+url = "https://drive.google.com/file/d/1k4UuaUJr8F39rxXRloGEJCSOxs_z2VW8"
+zip_filename = "yolov8n.zip"
 
 print("Downloading ZIP from Google Drive...")
 gdown.download(url, output=zip_filename, quiet=False, fuzzy=True)
