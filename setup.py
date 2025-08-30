@@ -2,7 +2,8 @@ import gdown
 import zipfile
 import os
 
-url = "https://drive.google.com/file/d/1k4UuaUJr8F39rxXRloGEJCSOxs_z2VW8"
+file_id = "1k4UuaUJr8F39rxXRloGEJCSOxs_z2VW8"
+url = f"https://drive.google.com/uc?id={file_id}&export=download"
 zip_filename = "yolov8n.zip"
 
 print("Downloading ZIP from Google Drive...")
